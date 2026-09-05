@@ -1,2 +1,4 @@
-docker-sock.iml
+whalevet.iml
 .idea
+bin/
+dist/

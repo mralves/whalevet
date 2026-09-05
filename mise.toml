@@ -1,0 +1,25 @@
+[tools]
+go = "1.27"
+golangci-lint = "2.13"
+gotestsum = "1.13"
+mockery = "3.7"
+act = "0.2"
+git-cliff = "2.14"
+
+[tasks.build]
+description = "Compile the whalevet binary into bin/"
+run = "go build -o bin/whalevet ./cmd/..."
+sources = ["go.mod", "go.sum", "cmd/**/*.go", "internal/**/*.go", "internal/**/*_test.go"]
+outputs = ["bin/whalevet"]
+
+[tasks.check]
+description = "Compile every package (catch unused imports, etc.)"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run all tests with gotestsum"
+run = "gotestsum --format testname ./..."
+
+[tasks.lint]
+description = "Run golangci-lint (see .golangci.yml)"
+run = "golangci-lint run"

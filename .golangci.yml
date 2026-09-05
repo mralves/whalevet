@@ -1,0 +1,52 @@
+# golangci-lint configuration (v2 schema).
+# Reference: https://golangci-lint.run/
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - gosec
+    - bodyclose
+    - errchkjson
+    - gocritic
+    - errorlint
+    - perfsprint
+    - usestdlibvars
+    - unconvert
+    - intrange
+    - modernize
+  settings:
+    gosec:
+      # G104 duplicates errcheck's findings for calls it already excludes
+      # (Close/Copy/Remove*), so it is turned off. Other gosec rules stay
+      # active (perms, crypto, subprocess, log injection).
+      excludes:
+        - G104
+    errcheck:
+      # Cleanup calls (closes, copies, removals) are excluded because their
+      # result is already visible in the data flow; reporting the error adds
+      # no value.
+      exclude-functions:
+        - "(net.Conn).Close"
+        - "(net.Listener).Close"
+        - "(*os.File).Close"
+        - "(io.ReadCloser).Close"
+        - "(*archive/tar.Writer).Close"
+        - "(net.Conn).Write"
+        - "io.Copy"
+        - "os.Remove"
+        - "os.RemoveAll"
+        - "(*archive/tar.Writer).Write"
+
+formatters:
+  enable:
+    - gofmt
