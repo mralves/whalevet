@@ -1,0 +1,214 @@
+# whalevet example configuration.
+#
+# Copy this file to ~/.config/whalevet/config.toml (or pass it with
+# --config PATH) and adjust it. Missing settings fall back to defaults.
+# Injection rules apply to every image build through the proxy socket, in
+# both the legacy builder and BuildKit modes.
+
+# ---------------------------------------------------------------------------
+# [proxy] wraps the Docker daemon socket.
+# ---------------------------------------------------------------------------
+[proxy]
+# Unix socket the proxy listens on. Point DOCKER_HOST at this in your shell rc.
+listen = "unix:///tmp/whalevet/docker.sock"
+
+# Real daemon socket this tool wraps. Nothing else should talk to it directly.
+docker_socket = "/var/run/docker.sock"
+
+# ---------------------------------------------------------------------------
+# [policy] allows or denies image references (pulls and container creates).
+#
+# Patterns are Unix-style globs: * matches any characters except "/", **
+# matches any characters including "/", and ? matches one character. Deny
+# entries always win. If allow is set, a reference must match it. An empty
+# policy allows everything. whalevet's own injected/build images are always
+# allowed.
+#
+#   deny  = ["evil/image/**"]             # block one registry namespace
+#   allow = ["internal-registry:5000/**"] # only allow this registry
+#
+# To allow everything by default with an explicit block-list, leave `allow` unset:
+# ---------------------------------------------------------------------------
+[policy]
+# allow = []
+deny = []
+
+# ---------------------------------------------------------------------------
+# [buildkit] wrapper frontend image for BuildKit builds
+# (via the "# syntax=whalevet:latest" directive) and for `whalevet setup`.
+# ---------------------------------------------------------------------------
+[buildkit]
+# Tag for the wrapper frontend image.
+frontend_tag = "whalevet:latest"
+
+# ---------------------------------------------------------------------------
+# Classic use case: trust a corporate/private CA so every image you build can
+# use TLS with your internal registry, VPN proxy, private package mirror,
+# etc. The proxy bakes the certs into the image at build time. For
+# container-create, it commits an updated container with the certs injected.
+# You can list any number of PEM files.
+#
+# Along with the certs, the proxy injects ENV vars so common language
+# runtimes pick up the regenerated OS bundle:
+#   SSL_CERT_FILE / SSL_CERT_DIR  -> Python, Go, Rust, curl, git
+#   CURL_CA_BUNDLE                -> curl
+#   REQUESTS_CA_BUNDLE / PIP_CERT -> Python requests / pip
+#   NODE_EXTRA_CA_CERTS           -> Node.js
+# Java is covered via the distro store: on Debian/Ubuntu,
+# update-ca-certificates regenerates the JVM cacerts through the
+# ca-certificates-java hook, and on RHEL-family images update-ca-trust
+# regenerates /etc/pki/java/cacerts. For Java images that don't integrate
+# (e.g. Alpine + temurin), add a `type = "env"` injection like the one
+# commented out at the bottom of this file.
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "ca_certificates"
+certificates = [
+  "/etc/ssl/certs/internal-ca.pem",
+  "/etc/ssl/certs/vpn-proxy-ca.pem",
+]
+
+# Optional: set extra env vars on every image alongside the CA injection.
+# These ENV lines are emitted right after the trust env vars above.
+#
+# Env values support Go text/template placeholders, so one rule maps to BOTH
+# the build path (where the path comes from the Dockerfile FROM's OS) and the
+# container-inject path (where it is the bundle actually extended inside the
+# image). This keeps the baked-in build env identical to what the running
+# container gets. Available fields:
+#   .BundlePath  single-file CA bundle that received the certs
+#   .TrustDir    hashed cert directory
+#   .CertDir     drop-in anchor dir
+# Other values pass through unchanged.
+#
+# Concretely, the GIT_SSL_CAINFO value below resolves to:
+#   Debian/Ubuntu/Alpine: /etc/ssl/certs/ca-certificates.crt
+#   RHEL/Fedora/CentOS : /etc/pki/tls/certs/ca-bundle.crt
+#   SUSE               : /etc/ssl/ca-bundle.pem
+env = {
+  GIT_SSL_CAINFO       = "{{.BundlePath}}",
+  NPM_CONFIG_CAFILE    = "{{.BundlePath}}",
+  LESS_OPEN            = "lesspipe.sh %s",
+  GIT_SSL_CERT_VERIFY  = "false",
+}
+
+# ---------------------------------------------------------------------------
+# Install extra packages right after the first FROM (e.g. debugging or ops
+# tooling present in every image). Position defaults to "after_base".
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "run"
+command = "apt-get update && apt-get install -y curl jq"
+position = "after_base"
+
+# ---------------------------------------------------------------------------
+# Run something just before the ENTRYPOINT/CMD (e.g. warm a cache volume, or
+# pre-seed config from a read-only mount at container start).
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "run"
+command = "mkdir -p /var/cache/app && touch /var/cache/app/.seed"
+position = "before_entrypoint"
+
+# ---------------------------------------------------------------------------
+# Rewrite the base image reference in every FROM line, useful for mirroring or
+# pinning a registry. `pattern` is a regular expression, `replacement` can use
+# $1, $2, ... capture groups.
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "from"
+pattern = "^ubuntu:"
+replacement = "my-registry.internal/ubuntu:"
+
+# ---------------------------------------------------------------------------
+# Multiple overrides for the same Dockerfile line are applied in order, e.g.
+# force a pinned tag across every Ubuntu base.
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "from"
+pattern = "(ubuntu:.+)"
+replacement = "my-registry.internal$1"
+
+# ---------------------------------------------------------------------------
+# Inject ENV lines into built images (e.g. corporate proxy settings so build
+# steps and running containers can reach the internet). Keys are sorted; you
+# can set any number of variables per rule.
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "env"
+env = {
+  HTTP_PROXY  = "http://proxy.internal:8080",
+  HTTPS_PROXY = "http://proxy.internal:8080",
+  NO_PROXY    = "localhost,127.0.0.1",
+}
+
+# ENV rules can also load KEY=VALUE entries from a file (docker-compose style:
+# '#' comments and surrounding quotes in values are handled). The path is
+# resolved relative to the config file's directory. Inline `env` entries win
+# over the same key loaded from the file.
+#
+# [[injections]]
+# type = "env"
+# env_file = "secrets/proxy.env"
+# env = { HTTP_PROXY = "http://proxy.internal:8080" } # wins over the file
+
+# ---------------------------------------------------------------------------
+# ENV rules also honor position: "before_entrypoint" injects just ahead of the
+# ENTRYPOINT/CMD (or at the end of the file when there is none).
+# ---------------------------------------------------------------------------
+[[injections]]
+type = "env"
+position = "before_entrypoint"
+env = { APP_ENV = "prod", LOG_LEVEL = "info" }
+
+# ---------------------------------------------------------------------------
+# Everything from here down is only illustrative and commented out.
+#
+# Tip: combine rules freely: CA trust + mirrors + tool installs cover the
+# most common air-gapped or proxied CI setups.
+#
+# [[injections]]
+# type = "ca_certificates"
+# certificates = ["corp-root.pem"]
+#
+# # Non-integrated Java images (e.g. Alpine + eclipse-temurin): import the
+# # injected certs into the JVM's default cacerts so every JVM trusts them
+# # (requires keytool, present in any JDK/JRE image).
+# [[injections]]
+# type = "run"
+# position = "after_base"
+# command = """
+# for f in /usr/local/share/ca-certificates/*.crt; do
+#   [ -e "$f" ] || continue
+#   keytool -importcert -noprompt \
+#     -keystore "$JAVA_HOME/lib/security/cacerts" \
+#     -storepass changeit \
+#     -alias "whalevet-$(basename "$f")" \
+#     -file "$f"
+# done
+# """
+#
+# [[injections]]
+# type = "run"
+# command = "yum install -y --nogpgcheck openssl"
+# position = "after_base"
+# ---------------------------------------------------------------------------
+#
+# # --- Template placeholders in env values ---
+# # Use {{.BundlePath}}, {{.TrustDir}} or {{.CertDir}} when the env var must
+# # point at the CA bundle that whalevet touched. The value is resolved per
+# # OS at build time and per image at container-create time, so what you bake
+# # into the image matches what the container runs with.
+# #
+# # Example: point several tools at the exact bundle that got the certs, while
+# # keeping other values literal.
+# [[injections]]
+# type = "ca_certificates"
+# certificates = ["/etc/ssl/certs/internal-ca.pem"]
+# env = {
+#   PIP_CERT            = "{{.BundlePath}}",   # -> bundle the certs were added to
+#   CURL_CA_BUNDLE      = "{{.BundlePath}}",
+#   REQUEST_BASE        = "https://mirror.internal", # literal, stays as-is
+#   SSL_CERT_DIR        = "{{.TrustDir}}",
+# }
+# ---------------------------------------------------------------------------
