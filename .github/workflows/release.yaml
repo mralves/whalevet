@@ -36,7 +36,7 @@ jobs:
             echo "No unreleased commits; nothing to draft."
             exit 0
           fi
-          next="$(git-cliff --bumped-version)"
+          next="v$(git-cliff --bumped-version)"
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
   build:
@@ -122,12 +122,12 @@ jobs:
           if gh release view "$VERSION" --json tagName -q .tagName >/dev/null 2>&1; then
             echo "Release or draft for $VERSION exists; refreshing it."
             gh release edit "$VERSION" \
-              --title "Next release: $VERSION" \
+              --title "$VERSION" \
               --notes-file CHANGE.md
           else
             gh release create "$VERSION" \
               --draft \
-              --title "Next release: $VERSION" \
+              --title "$VERSION" \
               --notes-file CHANGE.md
           fi
 
