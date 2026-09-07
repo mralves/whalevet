@@ -36,8 +36,8 @@ jobs:
             echo "No unreleased commits; nothing to draft."
             exit 0
           fi
-          next="v$(git-cliff --bumped-version)"
-          echo "version=$next" >> "$GITHUB_OUTPUT"
+          next="$(git-cliff --bumped-version | sed 's/^v//')"
+          echo "version=v${next}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build linux ${{ matrix.arch }}
