@@ -43,9 +43,8 @@ flowchart TB
 ## Install and setup
 
 ```bash
-go install github.com/mralves/whalevet/cmd@latest
-# or build from the repo:
-mise run build   # -> bin/whalevet
+# requires mise (https://mise.jdx.dev); installs the GitHub release binary
+mise use -y github:mralves/whalevet
 ```
 
 ```bash
