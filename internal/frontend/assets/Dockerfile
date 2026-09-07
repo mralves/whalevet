@@ -9,19 +9,17 @@
 # Build with rules baked in (example):
 #   whalevet setup [tag]
 #
-# The values are base64 JSON; the CLI helper above does the encoding:
+# The build context holds a static copy of the running whalevet binary plus
+# this Dockerfile, staged by the CLI helper; the wrapper is assembled from
+# that binary instead of a source checkout, so it builds from a released
+# binary too.
+#
+# The values are base64 JSON; the CLI helper does the encoding:
 #   RULES_JSON = base64(json([{type, ...}]))
 #   CERTS_JSON  = base64(json({"basename.crt": base64(pem)}))
 
-FROM golang:1.27-alpine AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /whalevet ./cmd/...
-
 FROM scratch
-COPY --from=build /whalevet /whalevet
+COPY whalevet /whalevet
 LABEL moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs,moby.buildkit.frontend.subrequests,moby.buildkit.frontend.contexts"
 ARG RULES_JSON=""
 ARG CERTS_JSON=""

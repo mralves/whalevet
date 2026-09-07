@@ -8,7 +8,7 @@ git-cliff = "2.14"
 
 [tasks.build]
 description = "Compile the whalevet binary into bin/"
-run = "go build -o bin/whalevet ./cmd/..."
+run = "CGO_ENABLED=0 go build -o bin/whalevet ./cmd/..."
 sources = ["go.mod", "go.sum", "cmd/**/*.go", "internal/**/*.go", "internal/**/*_test.go"]
 outputs = ["bin/whalevet"]
 

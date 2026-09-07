@@ -74,15 +74,14 @@ func sockPath(host string) string {
 	return rest
 }
 
-// BuildImage builds the whalevet wrapper frontend image, baking the
-// injection rules and certificate contents from the given config.
+// BuildImage builds the whalevet wrapper frontend image from the currently
+// executing whalevet binary, baking the injection rules and certificate
+// contents from the given config.
 //
 // tag:          image tag to produce (e.g. whalevet:latest).
 // frontendDir:  optional directory containing a frontend Dockerfile override.
 //
-//	When empty, the embedded wrapper Dockerfile is used; the repo
-//	root (go.mod) is found by walking up from the current and
-//	executable directories.
+//	When empty, the embedded wrapper Dockerfile is used.
 //
 // cfgPath:      path to the proxy config file (used for rules + certs).
 //
@@ -102,16 +101,11 @@ func BuildImage(tag, frontendDir, cfgPath string) error {
 		return fmt.Errorf("expand env_file rules: %w", err)
 	}
 
-	dfPath, cleanup, err := resolveDockerfile(frontendDir)
+	ctxDir, err := stageContext(frontendDir)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
-
-	repoRoot, err := findRepoRoot(frontendDir)
-	if err != nil {
-		return err
-	}
+	defer os.RemoveAll(ctxDir)
 
 	certContents, err := loadCertContents(rules)
 	if err != nil {
@@ -123,16 +117,15 @@ func BuildImage(tag, frontendDir, cfgPath string) error {
 		return err
 	}
 
-	log.Printf("Building frontend image %s with Dockerfile %s", tag, dfPath)
+	log.Printf("Building frontend image %s", tag)
 	log.Printf("Baking %d injection rules and %d CA certificates", len(rules), len(certContents))
 
 	cmd := exec.Command("docker", "build", //nolint:gosec // running docker is the tool's purpose; args come from the trusted config
 		"-t", tag,
-		"-f", dfPath,
 		"--build-arg", "RULES_JSON="+rulesJSON,
 		"--build-arg", "CERTS_JSON="+certsJSON,
 		"--label", BuiltAtLabel+"="+strconv.FormatInt(time.Now().Unix(), 10),
-		repoRoot,
+		ctxDir,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -202,67 +195,55 @@ func encodeBuildArgs(rules []config.Injection, certContents map[string][]byte) (
 		base64.StdEncoding.EncodeToString(certsBytes), nil
 }
 
-// resolveDockerfile returns the path to the wrapper Dockerfile to build with.
-// When frontendDir is empty, the embedded copy is written to a temp dir (the
-// cleanup func removes it); otherwise the Dockerfile inside frontendDir is
-// used.
-func resolveDockerfile(frontendDir string) (path string, cleanup func(), err error) {
+// stageContext prepares a docker build context for the frontend wrapper
+// image: a temp dir holding a copy of the currently running whalevet binary
+// and the wrapper Dockerfile. Building from the running binary — instead of
+// a source checkout — is what lets a released binary build its own wrapper
+// image without go.mod.
+func stageContext(frontendDir string) (dir string, err error) {
+	defer func() {
+		if err != nil {
+			os.RemoveAll(dir)
+		}
+	}()
+	dir, err = os.MkdirTemp("", "whalevet")
+	if err != nil {
+		return "", fmt.Errorf("create build context: %w", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate whalevet executable: %w", err)
+	}
+	data, err := os.ReadFile(exe) //nolint:gosec // path comes from os.Executable
+	if err != nil {
+		return "", fmt.Errorf("read whalevet executable %q: %w", exe, err)
+	}
+	//nolint:gosec // the staged binary must be executable inside the image
+	if err := os.WriteFile(filepath.Join(dir, "whalevet"), data, 0o755); err != nil {
+		return "", fmt.Errorf("stage whalevet executable: %w", err)
+	}
+
+	df, err := dockerfileContent(frontendDir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(df), 0o644); err != nil { //nolint:gosec // wrapper Dockerfile is embedded or user-controlled, not secrets
+		return "", fmt.Errorf("write wrapper Dockerfile: %w", err)
+	}
+	return dir, nil
+}
+
+// dockerfileContent returns the wrapper Dockerfile to use: the one inside
+// frontendDir when provided, else the embedded default.
+func dockerfileContent(frontendDir string) (string, error) {
 	if frontendDir != "" {
 		p := filepath.Join(frontendDir, "Dockerfile")
-		if _, statErr := os.Stat(p); statErr != nil {
-			return "", nil, fmt.Errorf("frontend Dockerfile not found in %q: %w", frontendDir, statErr)
-		}
-		return p, func() {}, nil
-	}
-	dir, mkErr := os.MkdirTemp("", "whalevet")
-	if mkErr != nil {
-		return "", nil, fmt.Errorf("create temp dir: %w", mkErr)
-	}
-	p := filepath.Join(dir, "Dockerfile")
-	if err := os.WriteFile(p, []byte(embeddedDockerfile), 0o600); err != nil {
-		os.RemoveAll(dir)
-		return "", nil, fmt.Errorf("write embedded Dockerfile: %w", err)
-	}
-	return p, func() { os.RemoveAll(dir) }, nil
-}
-
-// findRepoRoot locates the repository root containing go.mod. With a
-// non-empty dir (a custom frontend directory) it walks up from there;
-// otherwise it walks up from the current directory, falling back to the
-// executable's directory (service managers often run with a bare CWD).
-func findRepoRoot(dir string) (string, error) {
-	if dir != "" {
-		root, err := walkForGoMod(dir)
+		data, err := os.ReadFile(p) //nolint:gosec // a explicit frontend override dir is trusted user configuration
 		if err != nil {
-			return "", fmt.Errorf("repo root (go.mod) not found above %q", dir)
+			return "", fmt.Errorf("read frontend Dockerfile from %q: %w", p, err)
 		}
-		return root, nil
+		return string(data), nil
 	}
-	candidates := []string{}
-	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, cwd)
-	}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Dir(exe))
-	}
-	for _, c := range candidates {
-		if root, err := walkForGoMod(c); err == nil {
-			return root, nil
-		}
-	}
-	return "", errors.New("repo root (go.mod) not found above current or executable directory")
-}
-
-// walkForGoMod walks up from dir looking for a directory containing go.mod.
-func walkForGoMod(dir string) (string, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", fmt.Errorf("resolve absolute path %q: %w", dir, err)
-	}
-	for cur := abs; cur != "/" && cur != filepath.VolumeName(cur)+"\\"; cur = filepath.Dir(cur) {
-		if _, err := os.Stat(filepath.Join(cur, "go.mod")); err == nil {
-			return cur, nil
-		}
-	}
-	return "", fmt.Errorf("go.mod not found above %q", dir)
+	return embeddedDockerfile, nil
 }
