@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Compute next version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Compute next version
+        id: prepare
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          unreleased="$(git-cliff --unreleased --context | jq -r '.[0].commits | length')"
+          if [ "$unreleased" -eq 0 ]; then
+            echo "No unreleased commits; nothing to draft."
+            exit 0
+          fi
+          next="$(git-cliff --bumped-version)"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build linux ${{ matrix.arch }}
+    needs: prepare
+    if: needs.prepare.outputs.version != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, 386]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=${GOARCH} go build \
+            -trimpath -ldflags "-s -w" \
+            -o dist/whalevet ./cmd/...
+          tar -C dist -czf "dist/whalevet-${VERSION}-linux-${GOARCH}.tar.gz" whalevet
+          rm -f dist/whalevet
+          sha256sum "dist/whalevet-${VERSION}-linux-${GOARCH}.tar.gz" \
+            > "dist/whalevet-${VERSION}-linux-${GOARCH}.tar.gz.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 1
+
+  draft:
+    name: Draft release with changelog and assets
+    needs: [prepare, build]
+    if: needs.prepare.outputs.version != ''
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum whalevet-${VERSION}-linux-*.tar.gz > "whalevet-${VERSION}-checksums.txt"
+
+      - name: Generate changelog from conventional commits
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+        run: git-cliff --unreleased --tag "$VERSION" --strip header -o CHANGE.md
+
+      - name: Create or update draft release
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --json tagName -q .tagName >/dev/null 2>&1; then
+            echo "Release or draft for $VERSION exists; refreshing it."
+            gh release edit "$VERSION" \
+              --title "Next release: $VERSION" \
+              --notes-file CHANGE.md
+          else
+            gh release create "$VERSION" \
+              --draft \
+              --title "Next release: $VERSION" \
+              --notes-file CHANGE.md
+          fi
+
+      - name: Upload assets
+        run: gh release upload "$VERSION" dist/* --clobber
