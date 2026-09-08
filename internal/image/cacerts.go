@@ -23,7 +23,7 @@ func GetCACertConfig(os OSFamily) CACertConfig {
 	switch os {
 	case OSAlpine:
 		return CACertConfig{
-			InstallCmd: "apk add --no-cache ca-certificates",
+			InstallCmd: "apk add --no-cache --no-check-certificate ca-certificates",
 			CertDir:    "/usr/local/share/ca-certificates",
 			UpdateCmd:  "update-ca-certificates",
 			BundlePath: "/etc/ssl/cert.pem",
@@ -31,7 +31,7 @@ func GetCACertConfig(os OSFamily) CACertConfig {
 		}
 	case OSDebian, OSUbuntu:
 		return CACertConfig{
-			InstallCmd: "apt-get update && apt-get install -y --allow-unauthenticated ca-certificates",
+			InstallCmd: "apt-get -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false update && apt-get install -y --allow-unauthenticated -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false ca-certificates",
 			CertDir:    "/usr/local/share/ca-certificates",
 			UpdateCmd:  "update-ca-certificates",
 			BundlePath: "/etc/ssl/certs/ca-certificates.crt",
@@ -39,7 +39,7 @@ func GetCACertConfig(os OSFamily) CACertConfig {
 		}
 	case OSCentOS, OSFedora, OSRHEL, OSRocky, OSAlmaLinux, OSAmazonLinux:
 		return CACertConfig{
-			InstallCmd: "yum install -y --nogpgcheck ca-certificates",
+			InstallCmd: "yum install -y --nogpgcheck --setopt=sslverify=0 ca-certificates",
 			CertDir:    "/etc/pki/ca-trust/source/anchors",
 			UpdateCmd:  "update-ca-trust extract",
 			BundlePath: "/etc/pki/tls/certs/ca-bundle.crt",
@@ -63,7 +63,7 @@ func GetCACertConfig(os OSFamily) CACertConfig {
 		}
 	default:
 		return CACertConfig{
-			InstallCmd: "apt-get update && apt-get install -y --allow-unauthenticated ca-certificates",
+			InstallCmd: "apt-get -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false update && apt-get install -y --allow-unauthenticated -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false ca-certificates",
 			CertDir:    "/usr/local/share/ca-certificates",
 			UpdateCmd:  "update-ca-certificates",
 			BundlePath: "/etc/ssl/certs/ca-certificates.crt",

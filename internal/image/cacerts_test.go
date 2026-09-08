@@ -36,7 +36,7 @@ func TestModifyCACertAlpineBundlePath(t *testing.T) {
 	if !strings.Contains(got, "ENV SSL_CERT_FILE=/etc/ssl/cert.pem") {
 		t.Errorf("alpine should use /etc/ssl/cert.pem bundle:\n%s", got)
 	}
-	if !strings.Contains(got, "RUN apk add --no-cache ca-certificates") {
+	if !strings.Contains(got, "RUN apk add --no-cache --no-check-certificate ca-certificates") {
 		t.Errorf("alpine install command missing:\n%s", got)
 	}
 }
@@ -50,7 +50,7 @@ func TestModifyInlineCACertSetsTrustEnvVars(t *testing.T) {
 	if !strings.Contains(got, "ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt") {
 		t.Errorf("centos should use RHEL bundle:\n%s", got)
 	}
-	if !strings.Contains(got, "RUN yum install -y --nogpgcheck ca-certificates") {
+	if !strings.Contains(got, "RUN yum install -y --nogpgcheck --setopt=sslverify=0 ca-certificates") {
 		t.Errorf("centos install command missing:\n%s", got)
 	}
 }
