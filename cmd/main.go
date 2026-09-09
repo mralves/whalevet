@@ -37,6 +37,8 @@ func main() {
 		command.RunValidate(configPath, rest[1:])
 	case "status":
 		command.RunStatus(configPath, rest[1:])
+	case "version":
+		command.RunVersion(rest[1:])
 	case "uninstall":
 		command.RunUninstall(configPath, rest[1:])
 	case "prune":
@@ -66,6 +68,7 @@ Commands:
                    positions, policy) and exit non-zero on problems.
   status           Show the state of the install (config, socket, image,
                    service, shell rc). Always exits 0.
+  version          Print the whalevet version and exit.
   doctor           Verify that setup was done correctly and report mistakes.
   uninstall        Remove the systemd service, shell rc entry, and all
                    whalevet images. Confirms unless --yes is passed.
