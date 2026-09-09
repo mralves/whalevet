@@ -128,11 +128,15 @@ func GenerateCACertInlineLines(certContents map[string][]byte, os OSFamily) []st
 		installed = append(installed, target)
 	}
 
-	lines = append(lines, "# --- injected by whalevet: cover standalone bundles (e.g. /cacert.pem) ---")
-	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed))
-
 	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
 	lines = append(lines, "RUN "+cfg.UpdateCmd)
+
+	// Some store updaters (update-ca-trust on RHEL-family, trust extract on
+	// Arch/OpenSUSE) only include certs with CA basicConstraints, so CA:FALSE
+	// certs would silently vanish from the regenerated BundlePath. Append them
+	// after the update so they always land in the bundles OpenSSL/curl read.
+	lines = append(lines, "# --- injected by whalevet: ensure certs appear in CA bundles ---")
+	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed, cfg.BundlePath))
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(cfg.BundlePath, cfg.TrustDir)...)
@@ -163,12 +167,13 @@ func GenerateCACertDockerfileLines(certs []string, os OSFamily) []string {
 		installed = append(installed, target)
 		lines = append(lines, fmt.Sprintf("COPY %s %s", filepath.Base(cert), target))
 	}
-	lines = append(lines, "# --- injected by whalevet: cover standalone bundles (e.g. /cacert.pem) ---")
-	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed))
-
-	// Update certificate store
 	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
 	lines = append(lines, "RUN "+cfg.UpdateCmd)
+
+	// See GenerateCACertInlineLines: p11-kit based updaters drop CA:FALSE
+	// certs, so append after the update to guarantee presence in the bundles.
+	lines = append(lines, "# --- injected by whalevet: ensure certs appear in CA bundles ---")
+	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed, cfg.BundlePath))
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(cfg.BundlePath, cfg.TrustDir)...)
@@ -187,12 +192,13 @@ func shQuote(s string) string {
 }
 
 // AppendExtraBundlesCmd returns a shell snippet appending the given installed
-// cert files (absolute paths) to ExtraBundlePaths when present and missing.
-// Idempotent: skips files whose first bytes already appear in the bundle.
-func AppendExtraBundlesCmd(installedPaths []string) string {
+// cert files (absolute paths) to the OS BundlePath and ExtraBundlePaths when
+// present and missing. Idempotent: skips files whose base64 body already
+// appears in the bundle.
+func AppendExtraBundlesCmd(installedPaths []string, bundlePath string) string {
 	var sb strings.Builder
 	sb.WriteString("for __b in")
-	for _, b := range ExtraBundlePaths {
+	for _, b := range append(ExtraBundlePaths, bundlePath) {
 		sb.WriteString(" " + shQuote(b))
 	}
 	sb.WriteString("; do if [ -f \"$__b\" ]; then")
@@ -203,6 +209,10 @@ func AppendExtraBundlesCmd(installedPaths []string) string {
 	for _, p := range installedPaths {
 		sb.WriteString(" " + shQuote(p))
 	}
-	sb.WriteString("; do grep -qF -- \"$(head -c 64 \"$__f\")\" \"$__b\" || cat \"$__f\" >> \"$__b\"; done; fi; done")
+	// Marker: a 40-char slice of the first base64 body line. Short enough to
+	// survive bundles that re-wrap PEM to 60-64 cols, unique enough to never
+	// collide across different certs, and free of the "BEGIN CERTIFICATE"
+	// header so grep cannot match other entries.
+	sb.WriteString("; do __h=$(sed -n '2p' \"$__f\" | cut -c1-40); if [ -n \"$__h\" ]; then grep -qF -- \"$__h\" \"$__b\" || cat \"$__f\" >> \"$__b\"; else cat \"$__f\" >> \"$__b\"; fi; done; fi; done")
 	return sb.String()
 }

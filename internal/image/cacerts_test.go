@@ -54,3 +54,48 @@ func TestModifyInlineCACertSetsTrustEnvVars(t *testing.T) {
 		t.Errorf("centos install command missing:\n%s", got)
 	}
 }
+
+func TestGenerateCACertInlineLinesAppendsToBundleAfterUpdate(t *testing.T) {
+	certs := map[string][]byte{"root.pem": []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")}
+	out := strings.Join(GenerateCACertInlineLines(certs, OSFedora), "\n")
+
+	// The append must run after the store update, since update commands
+	// overwrite the bundle.
+	if !strings.Contains(out, "RUN update-ca-trust extract\n# --- injected by whalevet: ensure certs appear in CA bundles ---\nRUN for __b") {
+		t.Errorf("bundle append should follow the store update:\n%s", out)
+	}
+	if !strings.Contains(out, "'/etc/pki/tls/certs/ca-bundle.crt'") {
+		t.Errorf("RHEL BundlePath missing from append targets:\n%s", out)
+	}
+	// The dedupe must use a body-line marker, not the shared BEGIN header.
+	if strings.Contains(out, "head -c 64") {
+		t.Errorf("dedupe must not use head -c 64 (matches every cert):\n%s", out)
+	}
+	if !strings.Contains(out, "sed -n '2p'") {
+		t.Errorf("dedupe marker should be the first base64 body line:\n%s", out)
+	}
+}
+
+func TestGenerateCACertDockerfileLinesAppendsBundlePath(t *testing.T) {
+	out := strings.Join(GenerateCACertDockerfileLines([]string{"root.pem"}, OSArch), "\n")
+
+	if !strings.Contains(out, "'/etc/ssl/certs/ca-certificates.crt'") {
+		t.Errorf("arch BundlePath missing from append targets:\n%s", out)
+	}
+	if !strings.Contains(out, "RUN trust extract-compat\n# --- injected by whalevet: ensure certs appear in CA bundles ---") {
+		t.Errorf("arch append should follow trust extract-compat:\n%s", out)
+	}
+}
+
+func TestAppendExtraBundlesCmdUsesBodyMarker(t *testing.T) {
+	cmd := AppendExtraBundlesCmd([]string{"/etc/pki/ca-trust/source/anchors/root.crt"}, "/etc/pki/tls/certs/ca-bundle.crt")
+
+	if strings.Contains(cmd, "head -c") {
+		t.Errorf("dedupe must not rely on the shared PEM header:\n%s", cmd)
+	}
+	for _, want := range []string{"'/cacert.pem'", "'/etc/ssl/cert.pem'", "'/etc/pki/tls/certs/ca-bundle.crt'", "sed -n '2p'", "cut -c1-40"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("append snippet missing %q:\n%s", want, cmd)
+		}
+	}
+}
