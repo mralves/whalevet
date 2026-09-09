@@ -33,7 +33,7 @@ var fromPatterns = []struct {
 	{regexp.MustCompile(`^centos[:/]`), OSCentOS},
 	{regexp.MustCompile(`^fedora[:/]`), OSFedora},
 	{regexp.MustCompile(`^rhel[:/]`), OSRHEL},
-	{regexp.MustCompile(`^rocky[:/]`), OSRocky},
+	{regexp.MustCompile(`^rocky(?:linux)?[:/]`), OSRocky},
 	{regexp.MustCompile(`^almalinux[:/]`), OSAlmaLinux},
 	{regexp.MustCompile(`^amazonlinux[:/]`), OSAmazonLinux},
 	{regexp.MustCompile(`^archlinux[:/]`), OSArch},
