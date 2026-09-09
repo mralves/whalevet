@@ -119,11 +119,20 @@ func GenerateCACertInlineLines(certContents map[string][]byte, os OSFamily) []st
 	lines = append(lines, "RUN "+cfg.InstallCmd)
 
 	lines = append(lines, "# --- injected by whalevet: install custom CA certificates (inline) ---")
+	var installed []string
 	for name, content := range certContents {
+		target := cfg.CertDir + "/" + CertTargetName(name)
 		b64 := base64.StdEncoding.EncodeToString(content)
-		lines = append(lines, fmt.Sprintf("RUN mkdir -p %s && echo '%s' | base64 -d > %s/%s && chmod 644 %s/%s",
-			cfg.CertDir, b64, cfg.CertDir, name, cfg.CertDir, name))
+		lines = append(lines, fmt.Sprintf("RUN mkdir -p %s && echo '%s' | base64 -d > %s && chmod 644 %s",
+			cfg.CertDir, b64, target, target))
+		installed = append(installed, target)
 	}
+
+	lines = append(lines, "# --- injected by whalevet: cover standalone bundles (e.g. /cacert.pem) ---")
+	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed))
+
+	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
+	lines = append(lines, "RUN "+cfg.UpdateCmd)
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(cfg.BundlePath, cfg.TrustDir)...)
@@ -194,6 +203,6 @@ func AppendExtraBundlesCmd(installedPaths []string) string {
 	for _, p := range installedPaths {
 		sb.WriteString(" " + shQuote(p))
 	}
-	sb.WriteString("; do grep -qF \"$(head -c 64 \"$__f\")\" \"$__b\" || cat \"$__f\" >> \"$__b\"; done; fi; done")
+	sb.WriteString("; do grep -qF -- \"$(head -c 64 \"$__f\")\" \"$__b\" || cat \"$__f\" >> \"$__b\"; done; fi; done")
 	return sb.String()
 }
