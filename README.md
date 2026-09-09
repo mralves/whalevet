@@ -188,16 +188,36 @@ docker buildx build --no-cache .
 ```
 
 The rewrite targets both the `buildx` docker driver and daemon-side BuildKit
-builds (the `/session` diffcopy stream and the `/build`/`/grpc` build
-backend), covering `FROM`, `RUN`, `ENV` and base-image `ca_certificates`
-rules just like the legacy path.
+builds (the `/session` diffcopy stream and the `/grpc` build backend, plus
+the legacy `/build` tar path), covering `FROM`, `RUN`, `ENV` and base-image
+`ca_certificates` rules just like the legacy path.
+
+#### Supported versions
+
+- **Docker Engine 23.0+** for BuildKit injection: whalevet
+  rewrites the Dockerfile over the daemon's native BuildKit endpoints
+  (`/session` and `/grpc`), which are served by the default builder since
+  23.0. Verified through Engine 29.x (Engine API v1.41 – v1.55, min 1.40).
+  Engines with BuildKit enabled experimentally (18.09 – 22.x) may work but
+  are not supported.
+- **BuildKit clients** — `docker buildx` with the `docker` driver, and plain
+  `docker build` (BuildKit is the default in 23.0+). Both upload the
+  Dockerfile over the `/session` diffcopy stream, which whalevet rewrites as
+  it is served; `/grpc` carries the solve/status RPCs. The rewrite handles
+  both single-follow and multi-entry (`Dockerfile Dockerfile.dockerignore
+  dockerfile`) session streams.
+- **Legacy builder** (`DOCKER_BUILDKIT=0 docker build`): unchanged, the
+  Dockerfile is rewritten in the build context tar as it passes through
+  `/build`. Works on Docker Engine 20.10+.
 
 ## Prerequisites
 
 - Go 1.27 (development only)
 - Mise (development only)
 - Linux host (the proxy listens on a Unix socket)
-- Docker Engine 20.10 – 28.x (Engine API v1.41 – v1.50), or 23.0+ for BuildKit
+- Docker Engine 20.10+ (legacy builder, Engine API v1.41+), or 23.0+ for
+  BuildKit (`buildx` docker driver and daemon-side BuildKit; verified through
+  Engine 29.x / API v1.55)
 - systemd (optional)
 
 ## Development
