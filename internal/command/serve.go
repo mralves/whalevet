@@ -80,19 +80,6 @@ func logInjections(cfg *config.Config) {
 	log.Printf("Injections: %d rules", len(cfg.Injections))
 }
 
-// reloadProxyConfig re-reads the config file and re-applies it to the proxy.
-// On error the running proxy keeps its current config.
-func reloadProxyConfig(httpProxy *proxy.HTTPProxy, resolved string) {
-	cfg, err := config.Load(resolved)
-	if err != nil {
-		log.Printf("%s", color.RedString("Config reload failed (keeping current config): %v", err))
-		return
-	}
-	httpProxy.SetConfig(cfg)
-	log.Printf("%s", color.GreenString("Reloaded config from %s", resolved))
-	logInjections(cfg)
-}
-
 func runProxyServer(cfg *config.Config, resolved, overrideListen string) {
 	log.Printf("Starting whalevet (legacy builder: DOCKER_BUILDKIT=0; BuildKit: rewritten via proxy)")
 	log.Printf("Config file: %s", resolved)

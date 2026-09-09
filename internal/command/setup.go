@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	strings "strings"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/mralves/whalevet/internal/config"

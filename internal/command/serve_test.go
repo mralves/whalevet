@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mralves/whalevet/internal/config"
-	"github.com/mralves/whalevet/internal/proxy"
 )
 
 func TestServeSocketArg(t *testing.T) {
@@ -137,7 +136,15 @@ func TestReloadProxyConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hp := proxy.NewHTTPProxy(initial, nil, nil)
+	s, err := newServerState(initial, cfgPath, listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if l := s.currentListener(); l != nil {
+			l.Close()
+		}
+	}()
 
 	// Rewrite the config with a run injection and reload.
 	writeFile(t, cfgPath, `[proxy]
@@ -147,9 +154,9 @@ listen = "`+listen+`"
 type = "run"
 command = "echo hi"
 `)
-	reloadProxyConfig(hp, cfgPath)
+	s.reload()
 
-	got := hp.Config()
+	got := s.httpProxy.Config()
 	if len(got.Injections) != 1 || got.Injections[0].Command != "echo hi" {
 		t.Fatalf("injections after reload = %#v", got.Injections)
 	}
@@ -165,13 +172,21 @@ func TestReloadProxyConfigKeepsOldOnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hp := proxy.NewHTTPProxy(initial, nil, nil)
+	s, err := newServerState(initial, cfgPath, listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if l := s.currentListener(); l != nil {
+			l.Close()
+		}
+	}()
 
 	writeFile(t, cfgPath, "this is not toml [")
-	reloadProxyConfig(hp, cfgPath)
+	s.reload()
 
-	if hp.Config() != initial {
-		t.Fatalf("config changed despite failed reload: %#v", hp.Config())
+	if s.httpProxy.Config() != initial {
+		t.Fatalf("config changed despite failed reload: %#v", s.httpProxy.Config())
 	}
 }
 

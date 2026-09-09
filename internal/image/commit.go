@@ -58,10 +58,6 @@ type ImageInspectResponse struct {
 	} `json:"Config"`
 }
 
-type CommitResponse struct {
-	Id string `json:"Id"`
-}
-
 // HasProxyLabel checks if an image has the proxy injected label
 func HasProxyLabel(labels map[string]string) bool {
 	if labels == nil {
