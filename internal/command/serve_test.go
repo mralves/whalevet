@@ -4,7 +4,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -131,7 +130,8 @@ func TestRunProxyServerCreatesSocketDir(t *testing.T) {
 func TestReloadProxyConfig(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), "v1")
+	listen := sockAddr(home)
+	writeTestConfig(t, cfgPath, listen)
 
 	initial, err := config.Load(cfgPath)
 	if err != nil {
@@ -139,17 +139,9 @@ func TestReloadProxyConfig(t *testing.T) {
 	}
 	hp := proxy.NewHTTPProxy(initial, nil, nil)
 
-	// Hermetic docker: records invocations, reports a never-built image so the
-	// frontend rebuild always runs (like a config newer than the image would).
-	logPath := filepath.Join(home, "docker.log")
-	prependPath(t, loggingDocker(t, logPath))
-
 	// Rewrite the config with a run injection and reload.
 	writeFile(t, cfgPath, `[proxy]
-listen = "unix:///tmp/dsp.sock"
-
-[buildkit]
-frontend_tag = "v2"
+listen = "`+listen+`"
 
 [[injections]]
 type = "run"
@@ -157,18 +149,7 @@ command = "echo hi"
 `)
 	reloadProxyConfig(hp, cfgPath)
 
-	logData, err := os.ReadFile(logPath) //nolint:gosec // fixed temp path in test
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(logData), "image inspect") || !strings.Contains(string(logData), "build") {
-		t.Fatalf("config reload did not drive a frontend rebuild:\n%s", logData)
-	}
-
 	got := hp.Config()
-	if got.BuildKit.FrontendTag != "v2" {
-		t.Fatalf("frontend_tag after reload = %q, want v2", got.BuildKit.FrontendTag)
-	}
 	if len(got.Injections) != 1 || got.Injections[0].Command != "echo hi" {
 		t.Fatalf("injections after reload = %#v", got.Injections)
 	}
@@ -177,7 +158,8 @@ command = "echo hi"
 func TestReloadProxyConfigKeepsOldOnError(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), "v1")
+	listen := sockAddr(home)
+	writeTestConfig(t, cfgPath, listen)
 
 	initial, err := config.Load(cfgPath)
 	if err != nil {
@@ -188,7 +170,7 @@ func TestReloadProxyConfigKeepsOldOnError(t *testing.T) {
 	writeFile(t, cfgPath, "this is not toml [")
 	reloadProxyConfig(hp, cfgPath)
 
-	if hp.Config().BuildKit.FrontendTag != "v1" {
+	if hp.Config() != initial {
 		t.Fatalf("config changed despite failed reload: %#v", hp.Config())
 	}
 }
@@ -230,16 +212,12 @@ func TestRunProxyServerReloadReopensSocket(t *testing.T) {
 	cfgPath := filepath.Join(home, "config.toml")
 	sock1 := filepath.Join(home, "one.sock")
 	sock2 := filepath.Join(home, "two.sock")
-	writeTestConfig(t, cfgPath, "unix://"+sock1, "v1")
+	writeTestConfig(t, cfgPath, "unix://"+sock1)
 
 	initial, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Hermetic docker so the frontend rebuild during reload succeeds/reports.
-	logPath := filepath.Join(home, "docker.log")
-	prependPath(t, loggingDocker(t, logPath))
 
 	done := make(chan struct{})
 	go func() {
@@ -251,17 +229,9 @@ func TestRunProxyServerReloadReopensSocket(t *testing.T) {
 	waitForSocket(t, sock1, deadline)
 
 	// Change the listen address and let the watcher pick it up.
-	writeTestConfig(t, cfgPath, "unix://"+sock2, "v2")
+	writeTestConfig(t, cfgPath, "unix://"+sock2)
 	waitForSocket(t, sock2, deadline)
 	waitSocketGone(t, sock1, deadline)
-
-	logData, err := os.ReadFile(logPath) //nolint:gosec // fixed temp path in test
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(logData), "image inspect") {
-		t.Fatalf("config reload did not drive a frontend rebuild:\n%s", logData)
-	}
 
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)

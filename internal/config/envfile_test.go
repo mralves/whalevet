@@ -87,8 +87,7 @@ func TestLoadRecordsPath(t *testing.T) {
 func TestPolicyRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := &Config{
-		Proxy:    ProxyConfig{Listen: DefaultListen, DockerSocket: DefaultDockerSocket},
-		BuildKit: BuildKitConfig{FrontendTag: DefaultFrontendTag},
+		Proxy: ProxyConfig{Listen: DefaultListen, DockerSocket: DefaultDockerSocket},
 		Policy: PolicyConfig{
 			Allow: []string{"docker.io/library/*", "registry.internal/**"},
 			Deny:  []string{"**/untrusted/**"},
@@ -112,8 +111,7 @@ func TestPolicyRoundTrip(t *testing.T) {
 func TestEnvFileRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := &Config{
-		Proxy:    ProxyConfig{Listen: DefaultListen, DockerSocket: DefaultDockerSocket},
-		BuildKit: BuildKitConfig{FrontendTag: DefaultFrontendTag},
+		Proxy: ProxyConfig{Listen: DefaultListen, DockerSocket: DefaultDockerSocket},
 		Injections: []Injection{
 			{Type: "env", EnvFile: "vars.env", Env: map[string]string{"A": "b"}},
 		},

@@ -18,10 +18,6 @@ if [ "$1" = "images" ] && [ "$4" = "label=com.whalevet.injected" ]; then
   echo "sha256:inj222"
   exit 0
 fi
-if [ "$1" = "images" ] && [ "$4" = "label=com.whalevet.built-at" ]; then
-  echo "sha256:front1"
-  exit 0
-fi
 exit 0
 `)
 	return dir
@@ -86,7 +82,6 @@ func TestRunUninstallRemovesEverything(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SHELL", "/bin/zsh")
-	prependPath(t, fakeDocker(t))
 	binDir, _ := fakeSystemctlEnv(t)
 	prependPath(t, binDir)
 
@@ -95,7 +90,7 @@ func TestRunUninstallRemovesEverything(t *testing.T) {
 	prependPath(t, injectedDir)
 
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), "v1")
+	writeTestConfig(t, cfgPath, sockAddr(home))
 
 	if err := updateShellRC(sockAddr(home)); err != nil {
 		t.Fatal(err)
@@ -112,7 +107,6 @@ func TestRunUninstallRemovesEverything(t *testing.T) {
 	for _, want := range []string{
 		"rmi --force sha256:inj111",
 		"rmi --force sha256:inj222",
-		"rmi --force sha256:front1",
 	} {
 		if !strings.Contains(inv, want) {
 			t.Fatalf("docker not invoked with %q:\n%s", want, inv)
@@ -132,7 +126,7 @@ func TestRunUninstallAbortsWithoutConfirmation(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("SHELL", "/bin/zsh")
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), "v1")
+	writeTestConfig(t, cfgPath, sockAddr(home))
 
 	withAnswers(t, false)
 	RunUninstall(cfgPath, nil)

@@ -80,18 +80,12 @@ func logInjections(cfg *config.Config) {
 	log.Printf("Injections: %d rules", len(cfg.Injections))
 }
 
-// reloadProxyConfig re-reads the config file, re-applies it to the proxy, and
-// rebuilds the frontend image when the config is newer than the image (so rule
-// and cert changes baked into the wrapper take effect). On error the running
-// proxy keeps its current config and no rebuild is attempted.
+// reloadProxyConfig re-reads the config file and re-applies it to the proxy.
+// On error the running proxy keeps its current config.
 func reloadProxyConfig(httpProxy *proxy.HTTPProxy, resolved string) {
 	cfg, err := config.Load(resolved)
 	if err != nil {
 		log.Printf("%s", color.RedString("Config reload failed (keeping current config): %v", err))
-		return
-	}
-	if _, err := rebuildFrontend(resolved, ""); err != nil {
-		log.Printf("%s", color.RedString("Frontend rebuild after config reload failed (keeping current config): %v", err))
 		return
 	}
 	httpProxy.SetConfig(cfg)
@@ -100,7 +94,7 @@ func reloadProxyConfig(httpProxy *proxy.HTTPProxy, resolved string) {
 }
 
 func runProxyServer(cfg *config.Config, resolved, overrideListen string) {
-	log.Printf("Starting whalevet (legacy builder: DOCKER_BUILDKIT=0; BuildKit: use syntax directive)")
+	log.Printf("Starting whalevet (legacy builder: DOCKER_BUILDKIT=0; BuildKit: rewritten via proxy)")
 	log.Printf("Config file: %s", resolved)
 	log.Printf("Listen: %s", cfg.Proxy.Listen)
 	log.Printf("Docker socket: %s", cfg.Proxy.DockerSocket)
@@ -154,7 +148,7 @@ func runProxyServer(cfg *config.Config, resolved, overrideListen string) {
 }
 
 // serverState owns the proxy and its live listener so a reload can swap the
-// config, the frontend image and the listen address atomically.
+// config and the listen address atomically.
 type serverState struct {
 	httpProxy      *proxy.HTTPProxy
 	resolved       string
@@ -229,10 +223,9 @@ func openListener(addr string) (net.Listener, string, error) {
 	return l, "", nil
 }
 
-// reload re-reads the config file, rebuilds the frontend image when the config
-// is newer than the image, swaps the proxy to the new config and reopens the
-// proxy socket when the listen address changed. On any error the running proxy
-// keeps its current config, listener and image.
+// reload re-reads the config file, swaps the proxy to the new config and
+// reopens the proxy socket when the listen address changed. On any error the
+// running proxy keeps its current config and listener.
 func (s *serverState) reload() {
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
@@ -240,10 +233,6 @@ func (s *serverState) reload() {
 	cfg, err := config.Load(s.resolved)
 	if err != nil {
 		log.Printf("%s", color.RedString("Config reload failed (keeping current config): %v", err))
-		return
-	}
-	if _, err := rebuildFrontend(s.resolved, ""); err != nil {
-		log.Printf("%s", color.RedString("Frontend rebuild after config reload failed (keeping current config): %v", err))
 		return
 	}
 
@@ -314,7 +303,7 @@ func (s *serverState) acceptLoop() {
 // soon as it changes, so live edits take effect without a SIGHUP. The parent
 // directory is watched (not the file itself) so editors that save atomically
 // via rename are still caught; bursts of events per save collapse to one real
-// rebuild because needsRebuild is mtime-guarded.
+// reload.
 func watchConfig(resolved string, s *serverState) {
 	target, err := filepath.Abs(resolved)
 	if err != nil {

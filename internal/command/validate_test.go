@@ -112,9 +112,6 @@ func TestRunValidateSuccess(t *testing.T) {
 	content := `[proxy]
 listen = "unix:///tmp/dsp.sock"
 
-[buildkit]
-frontend_tag = "whalevet:latest"
-
 [[injections]]
 type = "ca_certificates"
 certificates = ["` + dir + `/ca.pem"]

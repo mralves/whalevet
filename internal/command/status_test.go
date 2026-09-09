@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-func runStatusCardinal(t *testing.T, withDaemon bool, tag string) string {
+func runStatusCardinal(t *testing.T, withDaemon bool) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SHELL", "/bin/zsh")
-	prependPath(t, fakeDocker(t))
 	binDir, _ := fakeSystemctlEnv(t)
 	prependPath(t, binDir)
 
@@ -27,7 +26,7 @@ func runStatusCardinal(t *testing.T, withDaemon bool, tag string) string {
 	}
 
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, "unix://"+sockPath, tag)
+	writeTestConfig(t, cfgPath, "unix://"+sockPath)
 
 	// Create systemd unit so checkSystemd finds the file.
 	unitPath := filepath.Join(home, ".config", "systemd", "user", serviceName+".service")
@@ -46,7 +45,7 @@ func runStatusCardinal(t *testing.T, withDaemon bool, tag string) string {
 }
 
 func TestRunStatusHealthy(t *testing.T) {
-	out := runStatusCardinal(t, true, "present-image")
+	out := runStatusCardinal(t, true)
 	if !strings.Contains(out, "status: healthy") {
 		t.Fatalf("expected healthy status, got:\n%s", out)
 	}
@@ -56,14 +55,13 @@ func TestRunStatusHealthy(t *testing.T) {
 }
 
 func TestRunStatusDegraded(t *testing.T) {
-	// No daemon, wrong tag, no unit, no rc → several checks fail.
+	// No daemon, no unit, no rc → several checks fail.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SHELL", "/bin/zsh")
-	prependPath(t, fakeDocker(t))
 
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, "unix:///nonexistent.sock", "absent-image")
+	writeTestConfig(t, cfgPath, "unix:///nonexistent.sock")
 
 	out := captureStdout(t, func() { RunStatus(cfgPath, nil) })
 	if !strings.Contains(out, "status: degraded") {

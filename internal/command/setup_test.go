@@ -5,23 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mralves/whalevet/internal/config"
 )
-
-func TestSetupTagArg(t *testing.T) {
-	if tag, err := setupTagArg(nil); err != nil || tag != "" {
-		t.Fatalf("no args: tag=%q err=%v", tag, err)
-	}
-	tag, err := setupTagArg([]string{"v1"})
-	if err != nil || tag != "v1" {
-		t.Fatalf("one arg: tag=%q err=%v", tag, err)
-	}
-	if _, err := setupTagArg([]string{"a", "b"}); err == nil {
-		t.Fatal("expected error for two args")
-	}
-}
 
 func TestEnsureConfigCreatesDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cfg", "config.toml")
@@ -36,7 +22,7 @@ func TestEnsureConfigCreatesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Proxy.Listen == "" || cfg.Proxy.DockerSocket == "" || cfg.BuildKit.FrontendTag == "" {
+	if cfg.Proxy.Listen == "" || cfg.Proxy.DockerSocket == "" {
 		t.Fatalf("defaults not written/loadable: %+v", cfg.Proxy)
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // fixed temp path in test
@@ -155,11 +141,10 @@ func TestInstallSystemdService(t *testing.T) {
 	}
 }
 
-func setupIntegration(t *testing.T, args []string, wantTag, initTag string) {
+func setupIntegration(t *testing.T) {
 	t.Helper()
 	t.Chdir(repoRoot(t))
 
-	prependPath(t, fakeDocker(t))
 	sysDir, _ := fakeSystemctlEnv(t)
 	prependPath(t, sysDir)
 
@@ -168,17 +153,17 @@ func setupIntegration(t *testing.T, args []string, wantTag, initTag string) {
 	t.Setenv("SHELL", "/bin/zsh")
 
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), initTag)
+	writeTestConfig(t, cfgPath, sockAddr(home))
 
-	withAnswers(t, true, true, true)
-	RunSetup(cfgPath, args)
+	withAnswers(t, true, true)
+	RunSetup(cfgPath, nil)
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BuildKit.FrontendTag != wantTag {
-		t.Fatalf("frontend_tag = %q, want %q", cfg.BuildKit.FrontendTag, wantTag)
+	if cfg.Proxy.Listen != sockAddr(home) {
+		t.Fatalf("proxy listen = %q, want %q", cfg.Proxy.Listen, sockAddr(home))
 	}
 
 	unitPath := filepath.Join(home, ".config", "systemd", "user", serviceName+".service")
@@ -200,77 +185,5 @@ func setupIntegration(t *testing.T, args []string, wantTag, initTag string) {
 }
 
 func TestRunSetupIntegration(t *testing.T) {
-	t.Run("explicit tag overrides config", func(t *testing.T) {
-		setupIntegration(t, []string{"newtag"}, "newtag", "oldtag")
-	})
-	t.Run("no tag keeps configured default", func(t *testing.T) {
-		setupIntegration(t, nil, "whalevet:latest", "")
-	})
-}
-
-func TestRunSetupSkipsRebuildWhenConfigUnchanged(t *testing.T) {
-	t.Chdir(repoRoot(t))
-
-	dockerDir := t.TempDir()
-	dockerLog := filepath.Join(t.TempDir(), "docker.log")
-	builtAtFile := filepath.Join(t.TempDir(), "built-at")
-	writeFakeBin(t, dockerDir, "docker", `#!/bin/sh
-echo "$@" >> "`+dockerLog+`"
-if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-  [ -f "`+builtAtFile+`" ] && cat "`+builtAtFile+`"
-  exit 0
-fi
-if [ "$1" = "build" ]; then
-  date +%s > "`+builtAtFile+`"
-  exit 0
-fi
-exit 0
-`)
-	prependPath(t, dockerDir)
-	sysDir, _ := fakeSystemctlEnv(t)
-	prependPath(t, sysDir)
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("SHELL", "/bin/zsh")
-
-	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), "v1")
-
-	withAnswers(t, true)
-	RunSetup(cfgPath, nil)
-	if got := countDockerBuilds(t, dockerLog); got != 1 {
-		t.Fatalf("first setup: %d builds, want 1", got)
-	}
-
-	withAnswers(t, true)
-	RunSetup(cfgPath, nil)
-	if got := countDockerBuilds(t, dockerLog); got != 1 {
-		t.Fatalf("unchanged config: %d builds, want 1", got)
-	}
-
-	future := time.Now().Add(5 * time.Second)
-	if err := os.Chtimes(cfgPath, future, future); err != nil {
-		t.Fatal(err)
-	}
-	withAnswers(t, true)
-	RunSetup(cfgPath, nil)
-	if got := countDockerBuilds(t, dockerLog); got != 2 {
-		t.Fatalf("config newer than image: %d builds, want 2", got)
-	}
-}
-
-func countDockerBuilds(t *testing.T, logPath string) int {
-	t.Helper()
-	data, err := os.ReadFile(logPath) //nolint:gosec // fixed temp path in test
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := 0
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "build ") {
-			n++
-		}
-	}
-	return n
+	setupIntegration(t)
 }

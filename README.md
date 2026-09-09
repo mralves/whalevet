@@ -48,22 +48,19 @@ mise use -y github:mralves/whalevet
 ```
 
 ```bash
-whalevet setup            # asks before each step (y/N; image build defaults
-                          # to yes, systemd service and DOCKER_HOST to no)
+whalevet setup            # asks before each step (systemd service and
+                          # DOCKER_HOST default to no)
 whalevet doctor           # verify setup and fix mistakes
 ```
 
 `setup` asks you to confirm each step:
 
-- **Build the frontend wrapper image** `[Y/n]`. Rebuilt only when
-  `config.toml` is newer than the image (build time is stored as an image
-  label).
 - **Install and start `whalevet.service`** as a systemd **user** service
   `[y/N]`. Restarted if already running.
 - **Set `DOCKER_HOST`** in your shell rc `[y/N]`.
 
 Whalevet waits for your input. An empty answer uses the default (shown in
-brackets). Use `build [tag]` for a non-interactive image-only build.
+brackets).
 
 Default config: `~/.config/whalevet/config.toml` (override with `--config`).
 
@@ -76,20 +73,17 @@ Commands:
   serve [socket]   Start the proxy server. An optional socket overrides the
                    listen address from the config file. Watches the config
                    file and reloads it on change or SIGHUP.
-  setup [tag]      Build the frontend wrapper image, install a systemd user
-                   service, and set DOCKER_HOST in the shell rc. An optional
-                   tag overrides frontend_tag from the config file.
-  build [tag]      Build the frontend wrapper image only. An optional tag
-                   overrides frontend_tag from the config file.
+  setup            Install a systemd user service, and set DOCKER_HOST in
+                   the shell rc.
   validate         Check the config file (rule syntax, certs, templates,
                    positions, policy) and exit non-zero on problems.
-  status           Show the state of the install (config, socket, image,
-                   service, shell rc). Always exits 0.
+  status           Show the state of the install (config, socket, service,
+                   shell rc). Always exits 0.
   doctor           Verify that setup was done correctly and report mistakes.
   uninstall        Remove the systemd service, shell rc entry, and all
                    whalevet images. Confirms unless --yes is passed.
-  prune            Remove whalevet-injected images and stale frontend
-                   tags. Confirms unless --yes is passed.
+  prune            Remove whalevet-injected images. Confirms unless --yes is
+                   passed.
 ```
 
 Run `whalevet serve` from systemd, or manually:
@@ -103,8 +97,6 @@ inotify/fsnotify). It also reloads on `SIGHUP` (from systemd that is
 `systemctl --user reload whalevet`). On reload the server:
 
 - re-reads the config
-- rebuilds the frontend image when the config is newer than the baked-in
-  rules, so rule and cert changes take effect immediately
 - swaps the new config into the running proxy
 
 If the listen address changed (or you passed a socket override), the listener
@@ -119,9 +111,6 @@ See [`config-example.toml`](config-example.toml) for the full annotated file.
 [proxy]
 listen = "unix:///tmp/whalevet/docker.sock"  # proxy socket (default)
 docker_socket = "/var/run/docker.sock"          # real daemon socket
-
-[buildkit]
-frontend_tag = "whalevet:latest"              # wrapper image tag
 
 [[injections]]
 type = "ca_certificates"
@@ -171,7 +160,7 @@ CA env injection sets the standard trust variables
 `[policy]` limits which images may be pulled or created as containers. It
 uses Unix-style globs (`*` does not cross `/`, `**` does, `?` matches a
 single character). Deny entries always win. If `allow` is non-empty, a
-reference must match it. Whalevet's own injected/frontend images are always
+reference must match it. Whalevet's own injected images are always
 allowed. Pulls are checked on `POST /images/create`; container creates on
 `POST /containers/create`. Denied requests get HTTP 403 with a Docker-style
 JSON body. Audit events (`pull_denied`, `create_denied`) are logged as
@@ -186,44 +175,22 @@ policy denials.
 
 ### BuildKit
 
-The transparent proxy can't change daemon-side BuildKit builds, so a wrapper
-frontend exists. Opt in per Dockerfile:
-
-```dockerfile
-# syntax=whalevet:latest
-FROM alpine:latest
-...
-```
-
-`setup` builds the wrapper image with your rules and certs baked in.
-
-#### Syntax override with a build argument
-
-`BUILDKIT_SYNTAX` is a predefined build argument that selects the frontend
-image from the command line. Use it to enable the whalevet wrapper (or point
-at a different ruleset tag) for one build, without editing the Dockerfile:
+The proxy applies the same injection rules to BuildKit builds. No wrapper
+image or `# syntax=` directive is needed: the daemon (or `docker buildx`)
+streams the Dockerfile through the proxy socket on the way to BuildKit, and
+whalevet rewrites it there, exactly like the legacy builder's `DOCKER_HOST`
+path.
 
 ```bash
-# the Dockerfile needs no # syntax= line at all
-docker build --build-arg BUILDKIT_SYNTAX=whalevet:latest .
+# point DOCKER_HOST at the proxy socket and build as usual
+whalevet serve
+docker buildx build --no-cache .
 ```
 
-The same override works in Docker Compose, per service with build `args`:
-
-```yaml
-services:
-  app:
-    build:
-      context: .
-      args:
-        BUILDKIT_SYNTAX: whalevet:latest
-```
-
-...or for every service in one command:
-
-```bash
-docker compose build --build-arg BUILDKIT_SYNTAX=whalevet:latest
-```
+The rewrite targets both the `buildx` docker driver and daemon-side BuildKit
+builds (the `/session` diffcopy stream and the `/build`/`/grpc` build
+backend), covering `FROM`, `RUN`, `ENV` and base-image `ca_certificates`
+rules just like the legacy path.
 
 ## Prerequisites
 

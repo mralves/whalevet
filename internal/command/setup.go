@@ -2,7 +2,6 @@ package command
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/mralves/whalevet/internal/config"
-	"github.com/mralves/whalevet/internal/frontend"
 )
 
 const serviceName = "whalevet"
@@ -41,22 +39,13 @@ var askConfirmation = func(prompt string, defaultYes bool) bool {
 }
 
 func RunSetup(configPath string, args []string) {
-	tag, err := setupTagArg(args)
-	if err != nil {
-		log.Fatalf("%v", err)
+	if len(args) > 0 {
+		log.Fatalf("usage: whalevet [--config PATH] setup")
 	}
 
 	resolved, err := ensureConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to prepare config: %v", err)
-	}
-
-	if askConfirmation("Build the frontend wrapper image?", true) {
-		if _, err := rebuildFrontend(resolved, tag); err != nil {
-			log.Fatalf("Failed to build frontend: %v", err)
-		}
-	} else {
-		log.Printf("%s", color.YellowString("Skipped frontend image build"))
 	}
 
 	if askConfirmation("Install and start the systemd user service?", false) {
@@ -81,50 +70,7 @@ func RunSetup(configPath string, args []string) {
 
 	log.Printf("%s", color.GreenString("Setup complete"))
 	log.Printf("%s", color.HiCyanString("  Config:      %s", resolved))
-	log.Printf("%s", color.HiCyanString("  Frontend tag:%s", cfg.BuildKit.FrontendTag))
 	log.Printf("%s", color.HiCyanString("  Proxy socket:%s", cfg.Proxy.Listen))
-}
-
-func setupTagArg(args []string) (string, error) {
-	if len(args) > 1 {
-		return "", errors.New("usage: whalevet [--config PATH] setup|build [tag]")
-	}
-	if len(args) == 1 {
-		return args[0], nil
-	}
-	return "", nil
-}
-
-// rebuildFrontend makes the frontend wrapper image current: it persists any
-// operator-supplied tag override into the config and rebuilds the image when
-// the config file is newer than the image's built-at stamp. Returns the
-// effective config so callers can read the resulting frontend tag and socket.
-func rebuildFrontend(resolved, tag string) (*config.Config, error) {
-	cfg, err := config.Load(resolved)
-	if err != nil {
-		return nil, fmt.Errorf("load config %q: %w", resolved, err)
-	}
-	if tag != "" && tag != cfg.BuildKit.FrontendTag {
-		cfg.BuildKit.FrontendTag = tag
-		if err := config.Write(resolved, cfg); err != nil {
-			return nil, fmt.Errorf("update config %q: %w", resolved, err)
-		}
-		log.Printf("%s", color.HiCyanString("Updated frontend_tag in %s", resolved))
-	}
-
-	needsBuild, err := needsRebuild(resolved, cfg.BuildKit.FrontendTag, cfg.Proxy.Listen)
-	if err != nil {
-		return nil, fmt.Errorf("decide frontend image rebuild: %w", err)
-	}
-	if needsBuild {
-		log.Printf("Config %s is newer than image %s; rebuilding", resolved, cfg.BuildKit.FrontendTag)
-		if err := frontend.BuildImage(cfg.BuildKit.FrontendTag, "", resolved); err != nil {
-			return nil, fmt.Errorf("build frontend image: %w", err)
-		}
-	} else {
-		log.Printf("Config %s unchanged since image %s built; skipping rebuild", resolved, cfg.BuildKit.FrontendTag)
-	}
-	return cfg, nil
 }
 
 func ensureConfig(configPath string) (string, error) {
@@ -140,29 +86,11 @@ func ensureConfig(configPath string) (string, error) {
 			Listen:       config.DefaultListen,
 			DockerSocket: config.DefaultDockerSocket,
 		},
-		BuildKit: config.BuildKitConfig{
-			FrontendTag: config.DefaultFrontendTag,
-		},
 	}); err != nil {
 		return "", fmt.Errorf("write default config %q: %w", resolved, err)
 	}
 	log.Printf("Created default config %s", resolved)
 	return resolved, nil
-}
-
-// needsRebuild reports whether the frontend image must be rebuilt. The image
-// carries a built-at annotation; it is rebuilt whenever the operator-supplied
-// config file is newer than that stamp, or when the image has no stamp yet.
-func needsRebuild(cfgPath, tag, proxyListen string) (bool, error) {
-	fi, err := os.Stat(cfgPath) //nolint:gosec // config path is given by the operator on the CLI
-	if err != nil {
-		return false, fmt.Errorf("stat config %q: %w", cfgPath, err)
-	}
-	builtAt, err := frontend.ImageBuiltAt(tag, proxyListen)
-	if err != nil {
-		return true, nil // missing image or stamp: nothing to compare against, build fresh
-	}
-	return fi.ModTime().Unix() > builtAt, nil
 }
 
 func installSystemdService(configPath string) error {

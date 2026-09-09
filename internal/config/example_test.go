@@ -53,9 +53,6 @@ func TestWriteRoundTripEnvCase(t *testing.T) {
 			Listen:       DefaultListen,
 			DockerSocket: "/var/run/docker.sock",
 		},
-		BuildKit: BuildKitConfig{
-			FrontendTag: "whalevet:latest",
-		},
 		Injections: []Injection{
 			{
 				Type:         "ca_certificates",

@@ -65,13 +65,6 @@ func RunValidate(configPath string, args []string) {
 			color.GreenString("[OK]"), len(cfg.Policy.Allow), len(cfg.Policy.Deny))
 	}
 
-	if cfg.BuildKit.FrontendTag == "" {
-		ok = false
-		fmt.Printf("  %s buildkit.frontend_tag is empty\n", color.RedString("[FAIL]"))
-	} else {
-		fmt.Printf("  %s   buildkit.frontend_tag = %s\n", color.GreenString("[OK]"), cfg.BuildKit.FrontendTag)
-	}
-
 	if ok {
 		fmt.Println(color.GreenString("Validation passed."))
 		return

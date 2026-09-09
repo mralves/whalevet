@@ -11,14 +11,12 @@ import (
 const (
 	DefaultListen       = "unix:///tmp/whalevet/docker.sock"
 	DefaultDockerSocket = "/var/run/docker.sock"
-	DefaultFrontendTag  = "whalevet:latest"
 )
 
 type Config struct {
-	Proxy      ProxyConfig    `toml:"proxy" mapstructure:"proxy"`
-	BuildKit   BuildKitConfig `toml:"buildkit" mapstructure:"buildkit"`
-	Policy     PolicyConfig   `toml:"policy,omitempty" mapstructure:"policy"`
-	Injections []Injection    `toml:"injections,omitempty" mapstructure:"injections"`
+	Proxy      ProxyConfig  `toml:"proxy" mapstructure:"proxy"`
+	Policy     PolicyConfig `toml:"policy,omitempty" mapstructure:"policy"`
+	Injections []Injection  `toml:"injections,omitempty" mapstructure:"injections"`
 	// Path is the absolute path of the loaded config file. Never persisted
 	// (Load records it so consumers can resolve relative paths like env_file
 	// against the config's directory).
@@ -28,10 +26,6 @@ type Config struct {
 type ProxyConfig struct {
 	Listen       string `toml:"listen,omitempty" mapstructure:"listen"`
 	DockerSocket string `toml:"docker_socket,omitempty" mapstructure:"docker_socket"`
-}
-
-type BuildKitConfig struct {
-	FrontendTag string `toml:"frontend_tag,omitempty" mapstructure:"frontend_tag"`
 }
 
 // PolicyConfig holds image reference allow/deny patterns applied to pulls
@@ -127,8 +121,5 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Proxy.DockerSocket == "" {
 		cfg.Proxy.DockerSocket = DefaultDockerSocket
-	}
-	if cfg.BuildKit.FrontendTag == "" {
-		cfg.BuildKit.FrontendTag = DefaultFrontendTag
 	}
 }

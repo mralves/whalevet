@@ -1,7 +1,6 @@
 package command
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -37,16 +36,13 @@ func RunDoctor(configPath string, args []string) {
 		} else {
 			r.pass("config file exists and is valid: %s", resolvedPath)
 
-			// 2. Frontend image
-			checkFrontendImage(r, cfg.BuildKit.FrontendTag)
-
-			// 3. Proxy server / socket
+			// 2. Proxy server / socket
 			checkServer(r, cfg.Proxy.Listen)
 
-			// 4. Systemd service
+			// 3. Systemd service
 			checkSystemd(r)
 
-			// 5. Shell rc DOCKER_HOST
+			// 4. Shell rc DOCKER_HOST
 			checkShellRC(r, cfg.Proxy.Listen)
 		}
 	}
@@ -57,22 +53,6 @@ func RunDoctor(configPath string, args []string) {
 		fmt.Println(color.RedString("\nSome checks failed. Fix the issues above and re-run doctor."))
 		os.Exit(1)
 	}
-}
-
-func checkFrontendImage(r *report, tag string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "images", "-q", tag) //nolint:gosec // running docker is the tool's purpose; tag comes from the trusted config
-	out, err := cmd.Output()
-	if err != nil {
-		r.fail("could not query docker images: %v", err)
-		return
-	}
-	if strings.TrimSpace(string(out)) == "" {
-		r.fail("frontend image %q is not built; run: whalevet setup", tag)
-		return
-	}
-	r.pass("frontend image %q exists", tag)
 }
 
 func checkServer(r *report, listen string) {

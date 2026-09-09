@@ -58,37 +58,8 @@ func prependPath(t *testing.T, dirs ...string) {
 	t.Setenv("PATH", path)
 }
 
-func fakeDocker(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	writeFakeBin(t, dir, "docker", `#!/bin/sh
-if [ "$1" = "images" ] && [ "$2" = "-q" ]; then
-  case "$3" in
-    absent-image) exit 0 ;;
-    *) echo "sha256:1111222233334444555566667777888899990000" ;;
-  esac
-fi
-exit 0
-`)
-	return dir
-}
-
-// loggingDocker is a hermetic docker that records every invocation to logPath
-// and returns success without doing anything, so a missing image / no-label
-// inspect makes the frontend rebuild run every time.
-func loggingDocker(t *testing.T, logPath string) string {
-	t.Helper()
-	dir := t.TempDir()
-	writeFakeBin(t, dir, "docker", `#!/bin/sh
-echo "$@" >> "`+logPath+`"
-if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-  exit 1  # no built-at label -> needsRebuild reports true
-fi
-exit 0
-`)
-	return dir
-}
-
+// fakeSystemctlEnv installs a recording systemctl stub and returns its bin dir
+// and log path.
 func fakeSystemctlEnv(t *testing.T) (binDir, logPath string) {
 	t.Helper()
 	binDir = t.TempDir()
@@ -113,14 +84,11 @@ func sockAddr(home string) string {
 	return "unix://" + filepath.Join(home, "dsp.sock")
 }
 
-func writeTestConfig(t *testing.T, path, listen, tag string) {
+func writeTestConfig(t *testing.T, path, listen string) {
 	t.Helper()
 	content := `[proxy]
 listen = "` + listen + `"
 docker_socket = "/var/run/docker.sock"
-
-[buildkit]
-frontend_tag = "` + tag + `"
 `
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)

@@ -8,22 +8,6 @@ import (
 	"testing"
 )
 
-func TestCheckFrontendImage(t *testing.T) {
-	prependPath(t, fakeDocker(t))
-
-	r := &report{ok: true}
-	captureStdout(t, func() { checkFrontendImage(r, "absent-image") })
-	if r.ok {
-		t.Fatal("absent image should fail")
-	}
-
-	r = &report{ok: true}
-	captureStdout(t, func() { checkFrontendImage(r, "present-image") })
-	if !r.ok {
-		t.Fatal("present image should pass")
-	}
-}
-
 func TestCheckServer(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -158,7 +142,6 @@ func TestRunDoctorSuccess(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SHELL", "/bin/zsh")
-	prependPath(t, fakeDocker(t))
 	binDir, _ := fakeSystemctlEnv(t)
 	prependPath(t, binDir)
 
@@ -170,7 +153,7 @@ func TestRunDoctorSuccess(t *testing.T) {
 	defer ln.Close()
 
 	cfgPath := filepath.Join(home, "config.toml")
-	writeTestConfig(t, cfgPath, sockAddr(home), "present-image")
+	writeTestConfig(t, cfgPath, sockAddr(home))
 
 	unitPath := filepath.Join(home, ".config", "systemd", "user", serviceName+".service")
 	if err := os.MkdirAll(filepath.Dir(unitPath), 0o700); err != nil {

@@ -2,8 +2,7 @@
 #
 # Copy this file to ~/.config/whalevet/config.toml (or pass it with
 # --config PATH) and adjust it. Missing settings fall back to defaults.
-# Injection rules apply to every image build through the proxy socket, in
-# both the legacy builder and BuildKit modes.
+# Injection rules apply to every image build through the proxy socket.
 
 # ---------------------------------------------------------------------------
 # [proxy] wraps the Docker daemon socket.
@@ -32,14 +31,6 @@ docker_socket = "/var/run/docker.sock"
 [policy]
 # allow = []
 deny = []
-
-# ---------------------------------------------------------------------------
-# [buildkit] wrapper frontend image for BuildKit builds
-# (via the "# syntax=whalevet:latest" directive) and for `whalevet setup`.
-# ---------------------------------------------------------------------------
-[buildkit]
-# Tag for the wrapper frontend image.
-frontend_tag = "whalevet:latest"
 
 # ---------------------------------------------------------------------------
 # Classic use case: trust a corporate/private CA so every image you build can

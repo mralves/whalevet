@@ -21,9 +21,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Proxy.DockerSocket != "/var/run/docker.sock" {
 		t.Fatalf("DockerSocket = %q", cfg.Proxy.DockerSocket)
 	}
-	if cfg.BuildKit.FrontendTag != "whalevet:latest" {
-		t.Fatalf("FrontendTag = %q", cfg.BuildKit.FrontendTag)
-	}
 }
 
 func TestLoadInvalid(t *testing.T) {
@@ -43,9 +40,6 @@ func TestWriteRoundTrip(t *testing.T) {
 			Listen:       "unix:///a.sock",
 			DockerSocket: "/d.sock",
 		},
-		BuildKit: BuildKitConfig{
-			FrontendTag: "t:1",
-		},
 		Injections: []Injection{
 			{Type: "run", Command: "apt-get update", Position: "after_from"},
 		},
@@ -57,8 +51,8 @@ func TestWriteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Proxy.Listen != src.Proxy.Listen || got.Proxy.DockerSocket != src.Proxy.DockerSocket || got.BuildKit.FrontendTag != src.BuildKit.FrontendTag {
-		t.Fatalf("proxy/buildkit roundtrip mismatch: %+v %+v", got.Proxy, got.BuildKit)
+	if got.Proxy.Listen != src.Proxy.Listen || got.Proxy.DockerSocket != src.Proxy.DockerSocket {
+		t.Fatalf("proxy roundtrip mismatch: %+v", got.Proxy)
 	}
 	if len(got.Injections) != 1 || got.Injections[0].Command != "apt-get update" {
 		t.Fatalf("injections roundtrip mismatch: %+v", got.Injections)

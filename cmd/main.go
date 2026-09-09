@@ -23,14 +23,10 @@ func main() {
 	}
 
 	switch rest[0] {
-	case "frontend":
-		command.RunFrontend(rest[1:])
 	case "serve":
 		command.RunServe(configPath, rest[1:])
 	case "setup":
 		command.RunSetup(configPath, rest[1:])
-	case "build":
-		command.RunBuild(configPath, rest[1:])
 	case "doctor":
 		command.RunDoctor(configPath, rest[1:])
 	case "validate":
@@ -59,21 +55,18 @@ Commands:
   serve [socket]   Start the proxy server. Optional socket overrides the
                    listen address from the config file. Reloads the config
                    on SIGHUP.
-  setup [tag]      Build the frontend wrapper image, install a systemd user
-                   service, and configure DOCKER_HOST in the shell rc.
-                   Optional tag overrides frontend_tag from the config file.
-  build [tag]      Build the frontend wrapper image only. Optional tag
-                   overrides frontend_tag from the config file.
+  setup            Install a systemd user service, and configure DOCKER_HOST
+                   in the shell rc.
   validate         Check the config file (rule syntax, certs, templates,
                    positions, policy) and exit non-zero on problems.
-  status           Show the state of the install (config, socket, image,
-                   service, shell rc). Always exits 0.
+  status           Show the state of the install (config, socket, service,
+                   shell rc). Always exits 0.
   version          Print the whalevet version and exit.
   doctor           Verify that setup was done correctly and report mistakes.
   uninstall        Remove the systemd service, shell rc entry, and all
                    whalevet images. Confirms unless --yes is passed.
-  prune            Remove whalevet-injected images and stale frontend
-                   tags. Confirms unless --yes is passed.
+  prune            Remove whalevet-injected images. Confirms unless --yes is
+                   passed.
 
 Global flags:
   --config PATH    Path to the config file (default: %s)

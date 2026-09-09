@@ -9,7 +9,7 @@ import (
 )
 
 // RunStatus reports the current state of the whalevet installation: config,
-// proxy socket, frontend image, systemd service and shell rc DOCKER_HOST.
+// proxy socket, systemd service and shell rc DOCKER_HOST.
 // Informational only: unlike doctor it always exits 0, so scripts can poll it
 // without tripping on a degraded-but-recoverable install.
 func RunStatus(configPath string, args []string) {
@@ -29,7 +29,6 @@ func RunStatus(configPath string, args []string) {
 			r.fail("config file is invalid: %v", err)
 		} else {
 			r.pass("config file valid: %s", resolvedPath)
-			checkFrontendImage(r, cfg.BuildKit.FrontendTag)
 			checkServer(r, cfg.Proxy.Listen)
 			checkSystemd(r)
 			checkShellRC(r, cfg.Proxy.Listen)

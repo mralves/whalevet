@@ -9,13 +9,12 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/mralves/whalevet/internal/config"
-	"github.com/mralves/whalevet/internal/frontend"
 )
 
 // RunUninstall reverses a previous setup: stops and removes the systemd user
 // service, strips the managed DOCKER_HOST block from the shell rc, and removes
-// the frontend image plus any whalevet-injected images. Requires a
-// confirmation unless --yes/-y is passed.
+// any whalevet-injected images. Requires a confirmation unless --yes/-y is
+// passed.
 func RunUninstall(configPath string, args []string) {
 	force := false
 	for _, a := range args {
@@ -140,19 +139,10 @@ func rmiImage(id string, env []string) {
 	log.Printf("%s", color.GreenString("Removed image %s", id))
 }
 
-// removeImages deletes the configured frontend image (identified by its
-// built-at label) and every whalevet-injected committed image.
+// removeImages deletes every whalevet-injected committed image.
 func removeImages(cfg *config.Config) {
-	env := frontend.CliEnv(cfg.Proxy.Listen)
-
-	// 1. whalevet-injected commits: label com.whalevet.injected=true.
+	env := dockerEnv(cfg.Proxy.Listen)
 	for _, id := range dockerImagesByLabel(injectedLabel, env) {
-		rmiImage(id, env)
-	}
-
-	// 2. frontend images built by this tool: have the built-at label. Remove
-	// them all; uninstall is a full teardown of managed artifacts.
-	for _, id := range dockerImagesByLabel(frontend.BuiltAtLabel, env) {
 		rmiImage(id, env)
 	}
 }
