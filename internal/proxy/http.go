@@ -160,8 +160,25 @@ func (p *HTTPProxy) ServeConn(clientConn net.Conn) {
 	// Forwarding preserves the original path; only matching is normalized.
 	path := apiPath(req.URL.Path)
 
-	// H2C upgrades (buildx /grpc and /session): tunnel opaquely.
+	// H2C upgrades (buildx /grpc and /session): rewrite Dockerfiles inside
+	// gRPC envelopes when possible; other upgrades tunnel opaquely.
 	if isUpgradeRequest(req) {
+		if strings.EqualFold(req.Header.Get("Upgrade"), "h2c") {
+			// The docker CLI's buildx session transport registers an active
+			// session by hitting dockerd's /session route, which hijacks the
+			// HTTP/1.1 connection and speaks HTTP/2 on it raw. Forward the
+			// request so the daemon sees the X-Docker-Expose-Session-* metadata
+			// and splice, or the session is never registered. DiffCopy-served
+			// Dockerfiles are rewritten by the session splice.
+			if req.URL.Path == "/session" {
+				log.Printf("[PROXY] h2c upgrade request %s, proxying via session splice", req.URL.Path)
+				p.serveSession(clientConn, reader, req)
+				return
+			}
+			log.Printf("[PROXY] h2c upgrade request %s, proxying via gRPC filter", req.URL.Path)
+			p.serveH2C(clientConn, reader, req)
+			return
+		}
 		log.Printf("[PROXY] Upgrade request %s, tunneling raw", req.URL.Path)
 		p.tunnelUpgrade(clientConn, reader, req)
 		return
