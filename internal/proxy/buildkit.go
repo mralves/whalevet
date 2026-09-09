@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"golang.org/x/net/http2"
@@ -42,6 +43,17 @@ func (p *HTTPProxy) snapshot() *rewriteSnapshot {
 	return s
 }
 
+// logSafe strips control characters from wire-derived values before they hit
+// the log, so untrusted header/path bytes cannot inject terminal escapes.
+func logSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // serveH2C turns an h2c upgrade connection into an HTTP/2 reverse proxy that
 // rewrites gRPC-embedded Dockerfiles. Any failure to establish the upstream
 // connection falls back to the raw tunnel, preserving current behavior.
@@ -64,7 +76,7 @@ func (p *HTTPProxy) serveH2C(clientConn net.Conn, clientReader *bufio.Reader, re
 
 	snap := p.snapshot()
 
-	var shared net.Conn = upConn
+	shared := upConn
 	var sharedOnce sync.Once
 	tr := &http2.Transport{
 		AllowHTTP: true,
@@ -121,11 +133,11 @@ func (p *HTTPProxy) proxyH2CStream(w http.ResponseWriter, r *http.Request, tr *h
 	req2.GetBody = nil
 	req2.Header.Del("Content-Length")
 	req2.Header.Del("Transfer-Encoding")
-	log.Printf("[H2C] stream %s %s", r.Method, r.URL.Path)
+	log.Printf("[H2C] stream %s %s", logSafe(r.Method), logSafe(r.URL.Path)) //nolint:gosec // logSafe strips control chars
 
 	resp, err := tr.RoundTrip(req2)
 	if err != nil {
-		log.Printf("[H2C] upstream RPC failed for %s: %v", r.URL.Path, err)
+		log.Printf("[H2C] upstream RPC failed for %s: %v", logSafe(r.URL.Path), err) //nolint:gosec // logSafe strips control chars
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
@@ -153,5 +165,5 @@ func (p *HTTPProxy) proxyH2CStream(w http.ResponseWriter, r *http.Request, tr *h
 			w.Header()[http.CanonicalHeaderKey(k)] = append(w.Header()[http.CanonicalHeaderKey(k)], v)
 		}
 	}
-	log.Printf("[H2C] stream done %s status=%d trailers=%d", r.URL.Path, resp.StatusCode, len(resp.Trailer))
+	log.Printf("[H2C] stream done %s status=%d trailers=%d", logSafe(r.URL.Path), resp.StatusCode, len(resp.Trailer)) //nolint:gosec // logSafe strips control chars
 }

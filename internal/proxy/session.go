@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 )
 
 // Rewriting of the moby.filesync.v1.FileSync / DiffCopy response that carries
@@ -47,7 +48,7 @@ func parseGRPCMessages(data []byte) ([][]byte, bool) {
 func grpcFrame(flags byte, payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	out[0] = flags
-	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload))) //nolint:gosec // len bounded by maxGRPCBuffer
 	copy(out[5:], payload)
 	return out
 }
@@ -71,6 +72,9 @@ func parseFSUTILStat(m []byte) (fsutilStat, bool) {
 		case f.num == 1 && f.wt == wtLen:
 			st.path = string(f.val)
 		case f.num == 5 && f.wt == wtVarint:
+			if f.uval > uint64(math.MaxInt) {
+				return fsutilStat{}, false
+			}
 			st.size = int(f.uval)
 		}
 	}

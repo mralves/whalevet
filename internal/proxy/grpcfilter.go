@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"strings"
 
@@ -63,7 +64,7 @@ func (r *grpcRewriteReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		if err := r.nextMessage(); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				r.finishTar()
 				r.done = true
 				continue
@@ -100,7 +101,7 @@ func (r *grpcRewriteReader) nextMessage() error {
 	out, _ := r.rewriteMessage(flags, payload)
 	emitted := make([]byte, 5)
 	emitted[0] = flags
-	binary.BigEndian.PutUint32(emitted[1:5], uint32(len(out)))
+	binary.BigEndian.PutUint32(emitted[1:5], uint32(len(out))) //nolint:gosec // output bounded by maxGRPCBuffer
 	r.out.Write(emitted)
 	r.out.Write(out)
 	return nil
@@ -176,10 +177,7 @@ func chunkAsBytesMessages(data []byte) [][]byte {
 	const chunk = 32 << 10
 	var out [][]byte
 	for len(data) > 0 {
-		n := chunk
-		if len(data) < n {
-			n = len(data)
-		}
+		n := min(chunk, len(data))
 		msg := make([]byte, 5+n)
 		binary.BigEndian.PutUint32(msg[1:5], uint32(n))
 		copy(msg[5:], data[:n])
@@ -302,11 +300,15 @@ func parseFields(m []byte) []field {
 			i += 4
 		case wtLen:
 			l, ln := varintAt(m, i)
-			if ln == 0 || l > uint64(len(m)) || i+ln+int(l) > len(m) {
+			if ln == 0 || l > uint64(len(m)) {
 				return nil
 			}
-			val = m[i+ln : i+ln+int(l)]
-			i = i + ln + int(l)
+			li := int(l) //nolint:gosec // l <= len(m) checked above, so fits in int
+			if i+ln+li > len(m) {
+				return nil
+			}
+			val = m[i+ln : i+ln+li]
+			i = i + ln + li
 		default:
 			return nil
 		}
@@ -339,7 +341,7 @@ func rewriteRecords(m []byte, tgt *rewriteTarget) ([]byte, bool) {
 	}
 
 	// Detect records at this level: field1 name, field2 content, field3 attrs.
-	for i := 0; i < len(fs)-2; i++ {
+	for i := range len(fs) - 2 {
 		f1, f2, f3 := &fs[i], &fs[i+1], &fs[i+2]
 		if f1.num != 1 || f1.wt != wtLen || !isDockerfileName(f1.val) {
 			continue

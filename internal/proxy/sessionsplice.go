@@ -76,6 +76,9 @@ func (p *HTTPProxy) serveSession(clientConn net.Conn, clientReader *bufio.Reader
 		log.Printf("[SESSION] no response from daemon: %v", err)
 		return
 	}
+	// For a 101 the body is the hijacked tunnel (reported as NoBody by
+	// ReadResponse), so closing it never touches the connection.
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		log.Printf("[SESSION] daemon refused upgrade: %d", resp.StatusCode)
 		_ = resp.Write(clientConn)
@@ -282,7 +285,7 @@ func (sp *sessionSplice) identify(hdlr *hpack.Decoder, sid uint32, block []byte)
 // the fsutil Stat path in the response) decides what actually gets rewritten.
 func dockerfileInFollows(follows []string) bool {
 	for _, f := range follows {
-		for _, p := range strings.Split(f, ",") {
+		for p := range strings.SplitSeq(f, ",") {
 			p = strings.TrimSpace(strings.Trim(p, `"`))
 			if isDockerfileName([]byte(path.Base(p))) {
 				return true

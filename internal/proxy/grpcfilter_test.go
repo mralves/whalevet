@@ -38,7 +38,7 @@ func framePayload(t *testing.T, b []byte) (byte, []byte) {
 func frame(flags byte, payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	out[0] = flags
-	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload))) //nolint:gosec // len bounded by maxGRPCBuffer
 	copy(out[5:], payload)
 	return out
 }
@@ -120,13 +120,7 @@ func (c *chunkReader) Read(p []byte) (int, error) {
 	if len(c.data) == 0 {
 		return 0, io.EOF
 	}
-	n := c.step
-	if n > len(c.data) {
-		n = len(c.data)
-	}
-	if n > len(p) {
-		n = len(p)
-	}
+	n := min(c.step, len(c.data), len(p))
 	copy(p, c.data[:n])
 	c.data = c.data[n:]
 	return n, nil
@@ -174,7 +168,9 @@ func TestTarEnvelopeRewrite(t *testing.T) {
 		body string
 	}{{"Dockerfile", realDockerfile}, {"notes.txt", "hello"}}
 	for _, f := range files {
-		tw.WriteHeader(&tar.Header{Name: f.name, Mode: 0644, Size: int64(len(f.body)), Typeflag: tar.TypeReg})
+		if err := tw.WriteHeader(&tar.Header{Name: f.name, Mode: 0644, Size: int64(len(f.body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("tar header %q: %v", f.name, err)
+		}
 		tw.Write([]byte(f.body))
 	}
 	tw.Close()

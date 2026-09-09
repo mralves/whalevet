@@ -9,13 +9,13 @@ import (
 // conn (c1.11): path "Dockerfile", size 43 (field 5), plus mode/mtime.
 func liveStatMsg(t *testing.T, path string, size int) []byte {
 	t.Helper()
-	out := []byte{0x0a, byte(len(path))}
+	out := []byte{0x0a, byte(len(path))} //nolint:gosec // test fixtures use short paths
 	out = append(out, path...)
 	// field 2 (mode) = 0x1a4
 	out = append(out, 0x10, 0xa4, 0x03)
 	// field 5 (size)
 	out = append(out, 5<<3)
-	out = appendVarint(out, uint64(size))
+	out = appendVarint(out, uint64(size)) //nolint:gosec // test fixtures use non-negative sizes
 	// field 6 (mtime) 9-byte varint
 	out = append(out, 0x30, 0xae, 0x88, 0xb1, 0xf5, 0x86, 0xe2, 0xcb, 0xe9, 0x18)
 	return out
@@ -61,7 +61,7 @@ func statSize(t *testing.T, statMsg []byte) int {
 	}
 	for _, f := range fs {
 		if f.num == 5 && f.wt == wtVarint {
-			return int(f.uval)
+			return int(f.uval) //nolint:gosec // test fixtures use sizes that fit in int
 		}
 	}
 	return -1
