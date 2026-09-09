@@ -164,14 +164,15 @@ reference must match it. Whalevet's own injected images are always
 allowed. Pulls are checked on `POST /images/create`; container creates on
 `POST /containers/create`. Denied requests get HTTP 403 with a Docker-style
 JSON body. Audit events (`pull_denied`, `create_denied`) are logged as
-structured journald-style JSON.
+plain-text `[AUDIT]` lines on stderr.
 
 ### Audit logging
 
-The proxy writes structured JSON events to stderr. They match `journald`'s
-structured fields (`MESSAGE`, plus per-event attrs). Events cover builds
-(`build`), container creates (`container_create`, cached or fresh), and
-policy denials.
+Audit events are written to stderr as plain-text lines with the same
+`[TAG]` style as the rest of the proxy logs, e.g.
+`[AUDIT] build dockerfile=Dockerfile rules=2 bytes_before=43 bytes_after=277`.
+Events cover builds (`build`), container creates (`container_create`, cached
+or fresh), and policy denials.
 
 ### BuildKit
 

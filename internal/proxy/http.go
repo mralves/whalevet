@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,14 +20,6 @@ import (
 	"github.com/mralves/whalevet/internal/image"
 	"github.com/mralves/whalevet/internal/tarutil"
 )
-
-// auditLogger emits structured (journald-friendly) JSON audit records to
-// stderr, which the systemd unit captures. Swap it in tests to capture.
-var auditLogger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
-
-func audit(msg string, attrs ...any) {
-	auditLogger.Info(msg, attrs...)
-}
 
 // loadCertFilesForTar reads cert files from ca_certificates injections and
 // returns them keyed by basename for injection into the build context tar.
