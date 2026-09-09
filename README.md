@@ -23,20 +23,23 @@ lets your containers trust an internal CA without editing every Dockerfile.
 
 ```mermaid
 flowchart TB
-    CLI["docker CLI<br/>DOCKER_HOST=unix:///tmp/whalevet/docker.sock"]
+    CLI["docker CLI / buildx<br/>DOCKER_HOST=unix:///tmp/whalevet/docker.sock"]
     Proxy["proxy socket"]
     Daemon["real Docker socket<br/>/var/run/docker.sock"]
+    BK["BuildKit<br/>(embedded in daemon 23.0+)"]
 
     CLI --> Proxy
 
     subgraph Intercepted
         direction LR
-        B1["POST /build<br/>read tar → rewrite Dockerfile → add certs → rebuild tar"]
-        B2["POST /containers/create<br/>pull → temp container → upload certs → commit as whalevet-injected/*"]
+        L["legacy POST /build<br/>read tar → rewrite Dockerfile → add certs → rebuild tar"]
+        B["POST /session + /grpc<br/>rewrite Dockerfile streamed to BuildKit"]
+        C["POST /containers/create<br/>pull → temp container → upload certs → commit as whalevet-injected/*"]
     end
 
-    Proxy --> B1 --> Daemon
-    Proxy --> B2 --> Daemon
+    Proxy --> L --> Daemon
+    Proxy --> B --> Daemon --> BK
+    Proxy --> C --> Daemon
     Proxy -. "everything else<br/>transparent pass-through" .-> Daemon
 ```
 
