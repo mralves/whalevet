@@ -1,6 +1,8 @@
 package image
 
 import (
+	"encoding/base64"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -76,6 +78,75 @@ func TestGenerateCACertInlineLinesAppendsToBundleAfterUpdate(t *testing.T) {
 	}
 }
 
+func TestGenerateCACertInlineLinesLargeMultiCertBundleSplitsPerCert(t *testing.T) {
+	// ~200KB of PEM (multi-cert bundle): single-line embedding exceeds
+	// BuildKit's per-line cap and the /bin/sh -c argument cap
+	// (MAX_ARG_STRLEN), which is what killed the build with "line greater than
+	// max allowed size of 65535" / exit 255.
+	const blocks = 2500
+	large := strings.Repeat("-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n", blocks)
+	out := strings.Join(GenerateCACertInlineLines(map[string][]byte{
+		"big.pem": []byte(large),
+	}, OSDebian), "\n")
+
+	for i, line := range strings.Split(out, "\n") {
+		if len(line) > 65535 {
+			t.Fatalf("line %d is %d bytes, exceeding BuildKit's 65535 cap", i, len(line))
+		}
+	}
+
+	// Every `printf '%s' '<chunk>'` write must be base64: collecting all chunk
+	// payloads and decoding them must reproduce the original certificate.
+	chunkPat := regexp.MustCompile(`RUN (?:mkdir -p [^ ]+ && )?printf '%s' '([^']*)' (?:>|>>)`)
+	var chunks []string
+	for _, m := range chunkPat.FindAllStringSubmatch(out, -1) {
+		chunks = append(chunks, m[1])
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected the payload to be chunked, got %d chunk(s)", len(chunks))
+	}
+	joined := strings.Join(chunks, "")
+	decoded, err := base64.StdEncoding.DecodeString(joined)
+	if err != nil {
+		t.Fatalf("chunk payload is not valid base64: %v", err)
+	}
+	if string(decoded) != large {
+		t.Fatalf("decoded payload differs from original: got %d bytes, want %d", len(decoded), len(large))
+	}
+
+	// Multi-cert bundles must be split into one file per certificate, fed
+	// through awk, and the append step must sweep the cert dir with a glob
+	// (never a literal per-file list, which would exceed the line cap).
+	if !strings.Contains(out, "awk -v D=") {
+		t.Fatalf("missing per-cert awk split for multi-cert bundle:\n%s", out)
+	}
+	if !strings.Contains(out, "for __f in /usr/local/share/ca-certificates/*.crt") {
+		t.Fatalf("append step must use a glob over the cert dir:\n%s", out)
+	}
+	if strings.Contains(out, "base64 -d /usr/local/share/ca-certificates/big.crt.b64 >") {
+		t.Fatalf("multi-cert bundle must not be written as a single .crt file:\n%s", out)
+	}
+}
+
+func TestGenerateCACertInlineLinesSingleCertWritesFileWhole(t *testing.T) {
+	single := "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n"
+	out := strings.Join(GenerateCACertInlineLines(map[string][]byte{
+		"root.pem": []byte(single),
+	}, OSDebian), "\n")
+
+	// Single-cert content keeps the whole-file path: direct base64 -d to the
+	// .crt target, no awk split.
+	if !strings.Contains(out, "&& rm /usr/local/share/ca-certificates/root.crt.b64 && chmod 644 /usr/local/share/ca-certificates/root.crt") {
+		t.Fatalf("single-cert bundle should be written whole:\n%s", out)
+	}
+	if strings.Contains(out, "awk -v D=") {
+		t.Fatalf("single-cert bundle must not be awk-split:\n%s", out)
+	}
+	if !strings.Contains(out, "for __f in /usr/local/share/ca-certificates/*.crt") {
+		t.Fatalf("append step must sweep the cert dir:\n%s", out)
+	}
+}
+
 func TestGenerateCACertDockerfileLinesAppendsBundlePath(t *testing.T) {
 	out := strings.Join(GenerateCACertDockerfileLines([]string{"root.pem"}, OSArch), "\n")
 
@@ -88,7 +159,7 @@ func TestGenerateCACertDockerfileLinesAppendsBundlePath(t *testing.T) {
 }
 
 func TestAppendExtraBundlesCmdUsesBodyMarker(t *testing.T) {
-	cmd := AppendExtraBundlesCmd([]string{"/etc/pki/ca-trust/source/anchors/root.crt"}, "/etc/pki/tls/certs/ca-bundle.crt")
+	cmd := AppendExtraBundlesCmd([]string{"/etc/pki/ca-trust/source/anchors/*.crt"}, "/etc/pki/tls/certs/ca-bundle.crt")
 
 	if strings.Contains(cmd, "head -c") {
 		t.Errorf("dedupe must not rely on the shared PEM header:\n%s", cmd)
@@ -97,5 +168,13 @@ func TestAppendExtraBundlesCmdUsesBodyMarker(t *testing.T) {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("append snippet missing %q:\n%s", want, cmd)
 		}
+	}
+	// Globs stay unquoted so they expand at shell runtime, and unmatched
+	// globs are guarded by the -f check.
+	if !strings.Contains(cmd, "/etc/pki/ca-trust/source/anchors/*.crt") {
+		t.Errorf("cert glob should be emitted unquoted:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "[ -f \"$__f\" ] || continue") {
+		t.Errorf("unmatched globs must be guarded:\n%s", cmd)
 	}
 }

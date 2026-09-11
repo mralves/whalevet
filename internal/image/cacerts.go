@@ -108,6 +108,18 @@ func caCertEnvLines(bundlePath, trustDir string) []string {
 // GenerateCACertInlineLines emits install + inline-write + update RUN lines.
 // Cert content is embedded base64 (no COPY, no context files needed), for
 // frontends that receive rules but cannot add files to the build context.
+//
+// Multi-cert bundles are split into one .crt file per certificate so store
+// updaters (update-ca-certificates / update-ca-trust) process each block
+// instead of skipping the whole file ("does not contain exactly one
+// certificate or CRL: skipping").
+//
+// Each RUN line is kept far under both limits the daemon's BuildKit frontend
+// enforces: per-line 65535 bytes, and per-command MAX_ARG_STRLEN (the exec
+// of `/bin/sh -c <cmd>` fails with exit 255 when the command exceeds the
+// kernel's single-argument cap, e.g. ~128KB). Large bundles are therefore
+// written across several RUN steps appending bounded base64 chunks to the
+// target file, each chunk small enough on its own.
 func GenerateCACertInlineLines(certContents map[string][]byte, os OSFamily) []string {
 	if len(certContents) == 0 {
 		return nil
@@ -119,13 +131,36 @@ func GenerateCACertInlineLines(certContents map[string][]byte, os OSFamily) []st
 	lines = append(lines, "RUN "+cfg.InstallCmd)
 
 	lines = append(lines, "# --- injected by whalevet: install custom CA certificates (inline) ---")
-	var installed []string
 	for name, content := range certContents {
 		target := cfg.CertDir + "/" + CertTargetName(name)
 		b64 := base64.StdEncoding.EncodeToString(content)
-		lines = append(lines, fmt.Sprintf("RUN mkdir -p %s && echo '%s' | base64 -d > %s && chmod 644 %s",
-			cfg.CertDir, b64, target, target))
-		installed = append(installed, target)
+		// The payload is buffered in a .b64 temp file across several bounded
+		// RUN writes, then decoded in a single base64 -d step after the last
+		// chunk. Feeding whole chunks to `echo | base64 -d` in one RUN would
+		// blow past the per-line / MAX_ARG_STRLEN caps again.
+		tmp := target + ".b64"
+		for j := 0; j < len(b64); j += inlineChunkSize {
+			chunk := b64[j:min(j+inlineChunkSize, len(b64))]
+			if j == 0 {
+				lines = append(lines, fmt.Sprintf("RUN mkdir -p %s && printf '%%s' '%s' > %s", cfg.CertDir, chunk, tmp))
+			} else {
+				lines = append(lines, fmt.Sprintf("RUN printf '%%s' '%s' >> %s", chunk, tmp))
+			}
+		}
+		if blocks := certBlockCount(content); blocks >= 2 {
+			// Split the decoded stream into per-cert files; each gets a
+			// deterministic <base>-NNNN.crt name in the cert dir. Store
+			// updaters reject any .crt containing more than one certificate
+			// ("does not contain exactly one certificate or CRL: skipping").
+			prefix := strings.TrimSuffix(filepath.Base(target), ".crt")
+			lines = append(lines, fmt.Sprintf(
+				"RUN base64 -d %s | awk -v D=%s -v P=%s '/-----BEGIN CERTIFICATE-----/{n++;on=1;f=sprintf(\"%%s/%%s-%%04d.crt\",D,P,n)} on{print > f} /-----END CERTIFICATE-----/{on=0}' && rm %s",
+				tmp, shQuote(cfg.CertDir), shQuote(prefix), tmp))
+		} else {
+			// Single block or non-cert content (e.g. a CRL): install the file
+			// whole, as before.
+			lines = append(lines, fmt.Sprintf("RUN base64 -d %s > %s && rm %s && chmod 644 %s", tmp, target, tmp, target))
+		}
 	}
 
 	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
@@ -135,8 +170,10 @@ func GenerateCACertInlineLines(certContents map[string][]byte, os OSFamily) []st
 	// Arch/OpenSUSE) only include certs with CA basicConstraints, so CA:FALSE
 	// certs would silently vanish from the regenerated BundlePath. Append them
 	// after the update so they always land in the bundles OpenSSL/curl read.
+	// Every *.crt we dropped into CertDir is appended (glob-expanded at shell
+	// runtime, so the Dockerfile line stays short for large bundles).
 	lines = append(lines, "# --- injected by whalevet: ensure certs appear in CA bundles ---")
-	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed, cfg.BundlePath))
+	lines = append(lines, "RUN "+AppendExtraBundlesCmd([]string{filepath.Join(cfg.CertDir, "*.crt")}, cfg.BundlePath))
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(cfg.BundlePath, cfg.TrustDir)...)
@@ -144,12 +181,36 @@ func GenerateCACertInlineLines(certContents map[string][]byte, os OSFamily) []st
 	return lines
 }
 
+// inlineChunkSize bounds each generated RUN write. With ~500 bytes of shell
+// wrapper and paths, a 56KB chunk keeps every emitted line below BuildKit's
+// 65535-byte-per-line ceiling and the whole `/bin/sh -c` argument well under
+// the kernel MAX_ARG_STRLEN (~128KB) that otherwise kills the exec with
+// exit 255.
+const inlineChunkSize = 56 << 10
+
 // CertTargetName returns the filename under which a cert must be installed:
 // basename with a .crt extension, since update-ca-certificates (and its
 // counterparts) only pick up *.crt files.
 func CertTargetName(path string) string {
 	base := filepath.Base(path)
 	return strings.TrimSuffix(base, filepath.Ext(base)) + ".crt"
+}
+
+// certBlockCount returns the number of `-----BEGIN CERTIFICATE-----` blocks
+// in a PEM payload. Block detection mirrors what update-ca-certificates
+// itself matches (a .crt file must contain exactly one of these to be
+// processed).
+func certBlockCount(content []byte) int {
+	var n int
+	body := string(content)
+	for {
+		i := strings.Index(body, "-----BEGIN CERTIFICATE-----")
+		if i < 0 {
+			return n
+		}
+		n++
+		body = body[i+len("-----BEGIN CERTIFICATE-----"):]
+	}
 }
 
 func GenerateCACertDockerfileLines(certs []string, os OSFamily) []string {
@@ -192,9 +253,14 @@ func shQuote(s string) string {
 }
 
 // AppendExtraBundlesCmd returns a shell snippet appending the given installed
-// cert files (absolute paths) to the OS BundlePath and ExtraBundlePaths when
-// present and missing. Idempotent: skips files whose base64 body already
-// appears in the bundle.
+// cert files (absolute paths, or sh globs expanding to them) to the OS
+// BundlePath and ExtraBundlePaths when present and missing. Idempotent: skips
+// files whose base64 body already appears in the bundle.
+//
+// Paths are emitted unquoted so globs expand inside the shell rather than at
+// Dockerfile parse time; the per-file [ -f ] guard skips unmatched globs.
+// This keeps the generated RUN line short no matter how many files match (a
+// literal enumeration would blow past BuildKit's 65535-byte line cap).
 func AppendExtraBundlesCmd(installedPaths []string, bundlePath string) string {
 	var sb strings.Builder
 	sb.WriteString("for __b in")
@@ -207,12 +273,12 @@ func AppendExtraBundlesCmd(installedPaths []string, bundlePath string) string {
 		sb.WriteString(" ")
 	}
 	for _, p := range installedPaths {
-		sb.WriteString(" " + shQuote(p))
+		sb.WriteString(" " + p)
 	}
 	// Marker: a 40-char slice of the first base64 body line. Short enough to
 	// survive bundles that re-wrap PEM to 60-64 cols, unique enough to never
 	// collide across different certs, and free of the "BEGIN CERTIFICATE"
 	// header so grep cannot match other entries.
-	sb.WriteString("; do __h=$(sed -n '2p' \"$__f\" | cut -c1-40); if [ -n \"$__h\" ]; then grep -qF -- \"$__h\" \"$__b\" || cat \"$__f\" >> \"$__b\"; else cat \"$__f\" >> \"$__b\"; fi; done; fi; done")
+	sb.WriteString("; do [ -f \"$__f\" ] || continue; __h=$(sed -n '2p' \"$__f\" | cut -c1-40); if [ -n \"$__h\" ]; then grep -qF -- \"$__h\" \"$__b\" || cat \"$__f\" >> \"$__b\"; else cat \"$__f\" >> \"$__b\"; fi; done; fi; done")
 	return sb.String()
 }
