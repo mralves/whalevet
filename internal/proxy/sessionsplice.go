@@ -40,10 +40,10 @@ func consumePreface(r *bufio.Reader) []byte {
 // daemon via FileSync/DiffCopy — the same content the client would otherwise
 // send us in a Dockerfile upload.
 //
-// V1 does not re-implement HTTP/2 flow control: the daemon grants the
-// client's send windows, the client respects them, and our insertion of a few
-// dozen bytes into a tiny DiffCopy is well inside the slack. Only the frames
-// of the Dockerfile sync are buffered; everything else flows through in real
+// The daemon window-paces the stream, so injected messages larger than the
+// negotiated send window are emitted over multiple frames gated on the
+// daemon's SETTINGS / WINDOW_UPDATE (see writeMessage). Only the frames of
+// the Dockerfile sync are buffered; everything else flows through in real
 // time. Any structural surprise fails open to verbatim splicing.
 func (p *HTTPProxy) serveSession(clientConn net.Conn, clientReader *bufio.Reader, req *http.Request) {
 	backendConn, err := dialUpstream(p.dockerSocket)
@@ -116,6 +116,7 @@ func (p *HTTPProxy) serveSession(clientConn net.Conn, clientReader *bufio.Reader
 		stat:    map[uint32]*fsutilStat{},
 		buf:     map[uint32]*bytes.Buffer{},
 	}
+	sp.initWindows()
 	log.Printf("[SESSION] session established, splicing with Dockerfile rewrite")
 	sp.run()
 }
@@ -132,11 +133,33 @@ type sessionSplice struct {
 	snap    *rewriteSnapshot
 
 	mu      sync.Mutex
+	winCond *sync.Cond
+	closed  bool
 	targets map[uint32]bool
 	// stat records the most recent fsutil Stat seen on each target stream, so
 	// the following Data message can be recognised as the Dockerfile's.
 	stat map[uint32]*fsutilStat
 	buf  map[uint32]*bytes.Buffer
+
+	// connWin is our budget for sending data toward the daemon on the whole
+	// connection (RFC 7540 connection flow-control window). strmWin is the
+	// same budget for the single target stream whose DiffCopy messages we
+	// rewrite. Both start at defaultFlowWindow and grow only when the daemon
+	// replenishes them via WINDOW_UPDATE / SETTINGS_INITIAL_WINDOW_SIZE; any
+	// outbound DATA eats from connWin, and target-stream DATA also eats from
+	// strmWin.
+	connWin int
+	strmWin int
+	initWin int // daemon's SETTINGS_INITIAL_WINDOW_SIZE for new target streams
+}
+
+// initWindows initialises the send-window accounting. Must be called once
+// before splicing; writeMessage and pumpDownstream block on winCond whenever
+// connWin/strmWin cannot cover the next frame.
+func (sp *sessionSplice) initWindows() {
+	sp.winCond = sync.NewCond(&sp.mu)
+	sp.connWin = defaultFlowWindow
+	sp.initWin = defaultFlowWindow
 }
 
 func (sp *sessionSplice) isTarget(sid uint32) bool {
@@ -149,6 +172,74 @@ func (sp *sessionSplice) markTarget(sid uint32) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	sp.targets[sid] = true
+	// A fresh stream starts with the daemon's current initial window.
+	sp.strmWin = sp.initWin
+}
+
+// applyWindowUpdate credits the send budget when the daemon replenishes it.
+func (sp *sessionSplice) applyWindowUpdate(sid uint32, inc uint32) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sid == 0 {
+		sp.connWin += int(inc)
+		sp.winCond.Broadcast()
+		return
+	}
+	if sp.targets[sid] {
+		sp.strmWin += int(inc)
+		sp.winCond.Broadcast()
+	}
+}
+
+// applySettings folds a daemon SETTINGS_INITIAL_WINDOW_SIZE change into the
+// stream budget (RFC 7540 §6.9.2: all existing streams shift by the delta).
+func (sp *sessionSplice) applySettings(payload []byte) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	for i := 0; i+6 <= len(payload); i += 6 {
+		id := binary.BigEndian.Uint16(payload[i : i+2])
+		val := binary.BigEndian.Uint32(payload[i+2 : i+6])
+		if id == 0x4 { // SETTINGS_INITIAL_WINDOW_SIZE
+			delta := int(val) - sp.initWin
+			sp.initWin = int(val)
+			sp.strmWin += delta
+			sp.winCond.Broadcast()
+		}
+	}
+}
+
+// waitWindow blocks until both send windows can cover n bytes, or until the
+// session is closing. Returns whether emission may proceed.
+func (sp *sessionSplice) waitWindow(n int) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	for sp.connWin < n || sp.strmWin < n {
+		if sp.closed {
+			return false
+		}
+		sp.winCond.Wait()
+	}
+	return !sp.closed
+}
+
+// spendWindow decrements the send budget for n bytes emitted toward the
+// daemon on sid.
+func (sp *sessionSplice) spendWindow(sid uint32, n int) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.connWin -= n
+	if sp.targets[sid] {
+		sp.strmWin -= n
+	}
+}
+
+// markClosed wakes any waiter blocked on the send window; the session is
+// ending and writeMessage must fail rather than stall.
+func (sp *sessionSplice) markClosed() {
+	sp.mu.Lock()
+	sp.closed = true
+	sp.winCond.Broadcast()
+	sp.mu.Unlock()
 }
 
 // run pumps both directions until either side closes.
@@ -223,6 +314,7 @@ func (sp *sessionSplice) writeF(dst net.Conn, raw []byte) bool {
 // pumpUpstream forwards daemon frames to the client verbatim, tracing DiffCopy
 // Dockerfile streams so the downstream pump knows what to rewrite.
 func (sp *sessionSplice) pumpUpstream() {
+	defer sp.markClosed()
 	hdlr := hpack.NewDecoder(4096, nil)
 	var hb []byte // accumulated header block across HEADERS + CONTINUATION
 	hbSid := uint32(0)
@@ -247,6 +339,14 @@ func (sp *sessionSplice) pumpUpstream() {
 					sp.identify(hdlr, hbSid, hb)
 					hb = nil
 				}
+			}
+		case 0x4: // SETTINGS
+			if f.flags&0x1 == 0 { // skip ACK frames; params only apply otherwise
+				sp.applySettings(f.payload)
+			}
+		case 0x8: // WINDOW_UPDATE
+			if len(f.payload) >= 4 {
+				sp.applyWindowUpdate(f.sid, binary.BigEndian.Uint32(f.payload)&0x7fffffff)
 			}
 		}
 		if !sp.writeF(sp.cliConn, f.raw) {
@@ -302,6 +402,7 @@ func dockerfileInFollows(follows []string) bool {
 // the Dockerfile's Data message content in place; fsutil writes whatever Data
 // bytes arrive and only uses Stat.Size for progress), and move on.
 func (sp *sessionSplice) pumpDownstream() {
+	defer sp.markClosed()
 	for {
 		f, err := readH2F(sp.cliR)
 		if err != nil {
@@ -326,6 +427,14 @@ func (sp *sessionSplice) pumpDownstream() {
 			}
 			sp.mu.Unlock()
 			continue
+		}
+		// Every DATA frame goes toward the daemon's connection window; wait
+		// for the daemon to replenish it before flooding past its budget.
+		if f.typ == 0x0 && f.sid != 0 && len(f.payload) > 0 {
+			if !sp.waitWindow(len(f.payload)) {
+				return
+			}
+			sp.spendWindow(f.sid, len(f.payload))
 		}
 		if !sp.writeF(sp.upConn, f.raw) {
 			return
@@ -382,15 +491,45 @@ func (sp *sessionSplice) emitMessages(sid uint32, msgs [][]byte) bool {
 	return true
 }
 
-// writeMessage emits one gRPC message as an HTTP/2 DATA frame, preserving the
-// message framing bytes.
+// maxWriteFrameSize caps each HTTP/2 DATA frame we emit. Peers negotiate
+// SETTINGS_MAX_FRAME_SIZE (protocol default 16384); a single frame above that
+// — or an over-long declared frame length — is rejected with "frame too
+// large". The rewritten Dockerfile can be arbitrarily large (inline CA
+// bundles), so each gRPC message is split across frames of at most this size.
+const maxWriteFrameSize = 16 << 10
+
+// defaultFlowWindow is the initial send window the daemon advertises
+// (SETTINGS_INITIAL_WINDOW_SIZE and the connection window both default to
+// 65535 per RFC 7540 §6.5.2 / §6.9.2) before any WINDOW_UPDATE.
+const defaultFlowWindow = 65535
+
+// writeMessage emits one gRPC message as HTTP/2 DATA frames, preserving the
+// message framing bytes. The message is split into frames of at most
+// maxWriteFrameSize: the HTTP/2 frame length field is only 24 bits wide and
+// peers refuse frames above their advertised maximum, so a message must never
+// be sent as a single frame. Emission also respects the daemon's send window:
+// once connWin/strmWin are exhausted we wait for the daemon's WINDOW_UPDATE
+// (or SETTINGS) to replenish them before writing more, so a rewritten
+// Dockerfile orders of magnitude larger than the original window is paced
+// through without tripping the daemon's flow control.
 func (sp *sessionSplice) writeMessage(sid uint32, m []byte) bool {
-	raw := make([]byte, 9+len(m))
-	l := len(m)
-	raw[1] = byte(l >> 8 & 0xff)
-	raw[2] = byte(l & 0xff)
-	raw[3] = 0x0 // DATA
-	binary.BigEndian.PutUint32(raw[5:9], sid)
-	copy(raw[9:], m)
-	return sp.writeF(sp.upConn, raw)
+	for len(m) > 0 {
+		n := min(len(m), maxWriteFrameSize)
+		if !sp.waitWindow(n) {
+			return false
+		}
+		raw := make([]byte, 9+n)
+		raw[0] = byte(n >> 16 & 0xff)
+		raw[1] = byte(n >> 8 & 0xff)
+		raw[2] = byte(n & 0xff)
+		raw[3] = 0x0 // DATA
+		binary.BigEndian.PutUint32(raw[5:9], sid)
+		copy(raw[9:], m[:n])
+		if !sp.writeF(sp.upConn, raw) {
+			return false
+		}
+		sp.spendWindow(sid, n)
+		m = m[n:]
+	}
+	return true
 }
