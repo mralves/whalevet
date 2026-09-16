@@ -1,6 +1,7 @@
 package image
 
 import (
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -68,17 +69,26 @@ func parseDockerfile(content string) []parsedLine {
 }
 
 func Modify(content string, rules []config.Injection) string {
-	return modify(content, rules, nil)
+	return modify(content, rules, nil, false)
 }
 
 // ModifyInline applies rules like Modify, but CA certificates are embedded
 // inline (cert name -> content) instead of COPYed, for frontends that cannot
 // add files to the build context.
 func ModifyInline(content string, rules []config.Injection, certContents map[string][]byte) string {
-	return modify(content, rules, certContents)
+	return modify(content, rules, certContents, true)
 }
 
-func modify(content string, rules []config.Injection, inlineCerts map[string][]byte) string {
+// ModifyCopy applies rules like Modify with certificate contents available,
+// so the legacy COPY path can split multi-cert bundles into one COPY per
+// certificate (see ExpandCertFilesForContext). certFiles maps the build
+// context entry name (the COPY source, which the caller must place in the
+// context tar) to its PEM content.
+func ModifyCopy(content string, rules []config.Injection, certFiles map[string][]byte) string {
+	return modify(content, rules, certFiles, false)
+}
+
+func modify(content string, rules []config.Injection, certContents map[string][]byte, inline bool) string {
 	parsed := parseDockerfile(content)
 
 	var fromReplacements []config.Injection
@@ -89,7 +99,6 @@ func modify(content string, rules []config.Injection, inlineCerts map[string][]b
 	var envBeforeEntrypoint []string
 	var extraCAEnv []string
 
-	inline := inlineCerts != nil
 	for _, rule := range rules {
 		switch rule.Type {
 		case "from":
@@ -124,9 +133,9 @@ func modify(content string, rules []config.Injection, inlineCerts map[string][]b
 		}
 		os := DetectOSFromFROM(fromLine)
 		if inline {
-			return GenerateCACertInlineLines(inlineCerts, os)
+			return GenerateCACertInlineLines(certContents, os)
 		}
-		return GenerateCACertDockerfileLines(caCerts, os)
+		return GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents), os)
 	}
 
 	var result []string
@@ -206,9 +215,9 @@ func modify(content string, rules []config.Injection, inlineCerts map[string][]b
 
 	if !injectedCerts && len(caCerts) > 0 {
 		if inline {
-			result = append(result, GenerateCACertInlineLines(inlineCerts, OSUnknown)...)
+			result = append(result, GenerateCACertInlineLines(certContents, OSUnknown)...)
 		} else {
-			result = append(result, GenerateCACertDockerfileLines(caCerts, OSUnknown)...)
+			result = append(result, GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents), OSUnknown)...)
 		}
 		for _, kv := range extraCAEnv {
 			result = append(result, "# --- injected by whalevet ---")
@@ -217,4 +226,19 @@ func modify(content string, rules []config.Injection, inlineCerts map[string][]b
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// dockerfileCertFiles returns the cert file set for the legacy COPY path:
+// the provided contents when available, otherwise a name-only set keyed by
+// each certificate's basename (kept whole, never split, since no content is
+// available to split from).
+func dockerfileCertFiles(caCerts []string, certFiles map[string][]byte) map[string][]byte {
+	if certFiles != nil {
+		return certFiles
+	}
+	files := make(map[string][]byte, len(caCerts))
+	for _, cert := range caCerts {
+		files[filepath.Base(cert)] = nil
+	}
+	return files
 }

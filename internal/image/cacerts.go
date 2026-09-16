@@ -2,8 +2,10 @@ package image
 
 import (
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -213,8 +215,71 @@ func certBlockCount(content []byte) int {
 	}
 }
 
-func GenerateCACertDockerfileLines(certs []string, os OSFamily) []string {
+// ExpandCertFilesForContext expands cert files (basename -> content) into the
+// set of files that must exist in the build context so the COPY lines emitted
+// by GenerateCACertDockerfileLines resolve. Multi-cert bundles are split into
+// one <base>-NNNN.crt entry per certificate (mirroring the inline awk split)
+// so store updaters process each block instead of skipping the whole file;
+// single-block files keep their original basename. This is the single source
+// of truth shared by the Dockerfile line generator and the context-tar writer.
+func ExpandCertFilesForContext(certFiles map[string][]byte) map[string][]byte {
+	expanded := make(map[string][]byte, len(certFiles))
+	names := make([]string, 0, len(certFiles))
+	for name := range certFiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		content := certFiles[name]
+		blocks := splitCertBlocks(content)
+		if blocks == nil {
+			expanded[name] = content
+			continue
+		}
+		prefix := strings.TrimSuffix(CertTargetName(name), ".crt")
+		for i, block := range blocks {
+			expanded[fmt.Sprintf("%s-%04d.crt", prefix, i+1)] = block
+		}
+	}
+	return expanded
+}
+
+// splitCertBlocks returns one PEM block per certificate when content holds two
+// or more certificates, nil otherwise (single-cert and non-cert content are
+// kept whole). Splitting mirrors the inline awk path's per-cert filenames.
+func splitCertBlocks(content []byte) [][]byte {
+	var blocks [][]byte
+	for rest := content; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			blocks = append(blocks, pem.EncodeToMemory(block))
+		}
+	}
+	if len(blocks) < 2 {
+		return nil
+	}
+	return blocks
+}
+
+// GenerateCACertDockerfileLines emits install + per-cert COPY + update RUN
+// lines for the legacy build path. certFiles maps the build-context entry name
+// (the COPY source, which the caller must place in the context tar) to its
+// PEM content. Multi-cert bundles are split into one <base>-NNNN.crt COPY per
+// certificate via ExpandCertFilesForContext, so store updaters process each
+// block instead of skipping the whole file.
+func GenerateCACertDockerfileLines(certFiles map[string][]byte, os OSFamily) []string {
 	cfg := GetCACertConfig(os)
+	expanded := ExpandCertFilesForContext(certFiles)
+	names := make([]string, 0, len(expanded))
+	for name := range expanded {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var lines []string
 
 	lines = append(lines, "# --- injected by whalevet: install ca-certificates package ---")
@@ -222,19 +287,19 @@ func GenerateCACertDockerfileLines(certs []string, os OSFamily) []string {
 
 	// Copy each certificate (source is basename, which must exist in build context root)
 	lines = append(lines, "# --- injected by whalevet: copy custom CA certificates ---")
-	var installed []string
-	for _, cert := range certs {
-		target := cfg.CertDir + "/" + CertTargetName(cert)
-		installed = append(installed, target)
-		lines = append(lines, fmt.Sprintf("COPY %s %s", filepath.Base(cert), target))
+	for _, name := range names {
+		target := cfg.CertDir + "/" + CertTargetName(name)
+		lines = append(lines, fmt.Sprintf("COPY %s %s", name, target))
 	}
 	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
 	lines = append(lines, "RUN "+cfg.UpdateCmd)
 
 	// See GenerateCACertInlineLines: p11-kit based updaters drop CA:FALSE
 	// certs, so append after the update to guarantee presence in the bundles.
+	// Sweep the cert dir with a glob (never a literal per-file list, which
+	// would exceed the line cap for split multi-cert bundles).
 	lines = append(lines, "# --- injected by whalevet: ensure certs appear in CA bundles ---")
-	lines = append(lines, "RUN "+AppendExtraBundlesCmd(installed, cfg.BundlePath))
+	lines = append(lines, "RUN "+AppendExtraBundlesCmd([]string{filepath.Join(cfg.CertDir, "*.crt")}, cfg.BundlePath))
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(cfg.BundlePath, cfg.TrustDir)...)

@@ -148,13 +148,63 @@ func TestGenerateCACertInlineLinesSingleCertWritesFileWhole(t *testing.T) {
 }
 
 func TestGenerateCACertDockerfileLinesAppendsBundlePath(t *testing.T) {
-	out := strings.Join(GenerateCACertDockerfileLines([]string{"root.pem"}, OSArch), "\n")
+	out := strings.Join(GenerateCACertDockerfileLines(map[string][]byte{
+		"root.pem": []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"),
+	}, OSArch), "\n")
 
 	if !strings.Contains(out, "'/etc/ssl/certs/ca-certificates.crt'") {
 		t.Errorf("arch BundlePath missing from append targets:\n%s", out)
 	}
 	if !strings.Contains(out, "RUN trust extract-compat\n# --- injected by whalevet: ensure certs appear in CA bundles ---") {
 		t.Errorf("arch append should follow trust extract-compat:\n%s", out)
+	}
+}
+
+func TestGenerateCACertDockerfileLinesSplitsMultiCertBundle(t *testing.T) {
+	bundle := "-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+	out := strings.Join(GenerateCACertDockerfileLines(map[string][]byte{
+		"combined.pem": []byte(bundle),
+	}, OSDebian), "\n")
+
+	// A multi-cert bundle must be COPYed per certificate into the cert dir so
+	// update-ca-certificates processes each block instead of skipping the
+	// whole .crt ("does not contain exactly one certificate or CRL").
+	for _, want := range []string{
+		"COPY combined-0001.crt /usr/local/share/ca-certificates/combined-0001.crt",
+		"COPY combined-0002.crt /usr/local/share/ca-certificates/combined-0002.crt",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing per-cert copy %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "COPY combined.pem") {
+		t.Errorf("multi-cert bundle must not be copied whole:\n%s", out)
+	}
+	if !strings.Contains(out, "for __f in /usr/local/share/ca-certificates/*.crt") {
+		t.Errorf("append must use a glob over the cert dir:\n%s", out)
+	}
+}
+
+func TestExpandCertFilesForContext(t *testing.T) {
+	single := "-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n"
+	multi := "-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+
+	got := ExpandCertFilesForContext(map[string][]byte{
+		"single.pem": []byte(single),
+		"multi.pem":  []byte(multi),
+	})
+
+	if got["single.pem"] == nil {
+		t.Errorf("single-cert file must keep its basename:\n%#v", got)
+	}
+	if string(got["multi-0001.crt"]) != string([]byte("-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n")) {
+		t.Errorf("multi-0001.crt should hold the first certificate:\n%#v", got)
+	}
+	if string(got["multi-0002.crt"]) != string([]byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")) {
+		t.Errorf("multi-0002.crt should hold the second certificate:\n%#v", got)
+	}
+	if got["multi.pem"] != nil {
+		t.Errorf("multi-cert bundle must be replaced by its split entries:\n%#v", got)
 	}
 }
 
