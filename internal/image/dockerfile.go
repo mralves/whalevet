@@ -127,15 +127,14 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 		}
 	}
 
-	certLines := func(fromLine string) []string {
+	certLines := func() []string {
 		if len(caCerts) == 0 {
 			return nil
 		}
-		os := DetectOSFromFROM(fromLine)
 		if inline {
-			return GenerateCACertInlineLines(certContents, os)
+			return GenerateCACertInlineLines(certContents)
 		}
-		return GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents), os)
+		return GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents))
 	}
 
 	var result []string
@@ -159,12 +158,10 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 		// and CA certs
 		if pl.isFROM && !injectedAfterBase {
 			injectedAfterBase = true
-			os := DetectOSFromFROM(line)
-			cfg := GetCACertConfig(os)
 			envCtx = EnvContext{
-				BundlePath: cfg.BundlePath,
-				TrustDir:   cfg.TrustDir,
-				CertDir:    cfg.CertDir,
+				BundlePath: canonicalBundlePath,
+				TrustDir:   canonicalTrustDir,
+				CertDir:    canonicalTrustDir,
 			}
 			for _, cmd := range runAfterBase {
 				result = append(result, "# --- injected by whalevet ---")
@@ -176,7 +173,7 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 			}
 			if len(caCerts) > 0 && !injectedCerts {
 				injectedCerts = true
-				result = append(result, certLines(line)...)
+				result = append(result, certLines()...)
 				for _, kv := range renderEnvKVs(extraCAEnv, envCtx) {
 					result = append(result, "# --- injected by whalevet ---")
 					result = append(result, "ENV "+kv)
@@ -215,9 +212,9 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 
 	if !injectedCerts && len(caCerts) > 0 {
 		if inline {
-			result = append(result, GenerateCACertInlineLines(certContents, OSUnknown)...)
+			result = append(result, GenerateCACertInlineLines(certContents)...)
 		} else {
-			result = append(result, GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents), OSUnknown)...)
+			result = append(result, GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents))...)
 		}
 		for _, kv := range extraCAEnv {
 			result = append(result, "# --- injected by whalevet ---")
