@@ -384,11 +384,13 @@ func (p *HTTPProxy) handleBuildConn(clientConn net.Conn, req *http.Request) {
 		log.Printf("[HTTP] env_file expansion failed (%v), using unexpanded rules", err)
 		inj = cfg.Injections
 	}
-	extraFiles := image.ExpandCertFilesForContext(loadCertFilesForTar(inj))
-	modifiedContent := image.ModifyCopy(dockerfileContent, inj, extraFiles)
+	// Context files are the original basenames: multi-cert bundles are split
+	// inside the container, so no per-certificate expansion is needed here.
+	certFiles := loadCertFilesForTar(inj)
+	modifiedContent := image.ModifyCopy(dockerfileContent, inj, certFiles)
 	log.Printf("[HTTP] Modified (%d -> %d bytes)", len(dockerfileContent), len(modifiedContent)) //nolint:gosec // byte-length counters, not client-controlled strings
 
-	newTar := tarutil.RebuildTar(entries, dockerfilePath, modifiedContent, extraFiles)
+	newTar := tarutil.RebuildTar(entries, dockerfilePath, modifiedContent, certFiles)
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, newTar); err != nil {
 		p.forwardHTTPConn(clientConn, req, body)

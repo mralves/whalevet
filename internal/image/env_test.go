@@ -48,6 +48,35 @@ func TestRenderEnvValue(t *testing.T) {
 	}
 }
 
+func TestEnvBlockLines(t *testing.T) {
+	// Foldable values share one ENV instruction (one layer).
+	got := envBlockLines([]string{"B=2", "A=1"})
+	want := []string{"# --- injected by whalevet ---", "ENV B=2 A=1"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("folded block = %q, want %q", got, want)
+	}
+
+	// Values with whitespace keep one ENV per pair (Dockerfile splits ENV
+	// pairs on unquoted whitespace).
+	got = envBlockLines([]string{"OK=1", "SPACED=a b"})
+	want = []string{
+		"# --- injected by whalevet ---", "ENV OK=1",
+		"# --- injected by whalevet ---", "ENV SPACED=a b",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("unfolded block = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	if got := envBlockLines(nil); got != nil {
+		t.Errorf("empty block = %q, want nil", got)
+	}
+}
+
 func TestMergeEnv(t *testing.T) {
 	base := []string{"A=1", "B=2"}
 	overrides := []string{"B=overridden", "C=3"}

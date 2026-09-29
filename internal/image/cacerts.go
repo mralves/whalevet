@@ -2,7 +2,6 @@ package image
 
 import (
 	"encoding/base64"
-	"encoding/pem"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -93,12 +92,10 @@ func caCertEnvVars(bundlePath, trustDir string) []string {
 }
 
 func caCertEnvLines(bundlePath, trustDir string) []string {
-	vars := caCertEnvVars(bundlePath, trustDir)
-	lines := make([]string, 0, len(vars))
-	for _, v := range vars {
-		lines = append(lines, "ENV "+v)
-	}
-	return lines
+	// All trust variables fold into a single ENV instruction (one layer
+	// instead of six). Values are fixed store paths without whitespace, so
+	// Dockerfile's space-separated ENV pairs need no quoting.
+	return []string{"ENV " + strings.Join(caCertEnvVars(bundlePath, trustDir), " ")}
 }
 
 // detectScriptLines emits the RUN steps that install caCertDetectScript into
@@ -128,6 +125,13 @@ func inlineWritePayloadLines(target string, content []byte) []string {
 	return lines
 }
 
+// awkSplitProg splits PEM input into one file per certificate under the -v D
+// directory, named <P>-NNNN.crt. Store updaters reject any .crt holding more
+// than one certificate ("does not contain exactly one certificate or CRL:
+// skipping"), so multi-cert bundles must go through this split, on both the
+// inline and the legacy COPY paths.
+const awkSplitProg = `/-----BEGIN CERTIFICATE-----/{n++;on=1;f=sprintf("%s/%s-%04d.crt",D,P,n)} on{print > f} /-----END CERTIFICATE-----/{on=0}`
+
 // inlineCertWriteLines emits the RUN steps that base64-chunk content into
 // wvStagingDir, then decode it into the runtime-detected "$WV_CERTDIR" as one
 // .crt per certificate (or the whole file for single-cert / non-cert content).
@@ -151,8 +155,8 @@ func inlineCertWriteLines(name string, content []byte) []string {
 		// ("does not contain exactly one certificate or CRL: skipping").
 		prefix := strings.TrimSuffix(CertTargetName(name), ".crt")
 		lines = append(lines, fmt.Sprintf(
-			"RUN . %s && mkdir -p \"$WV_CERTDIR\" && base64 -d %s | awk -v D=\"$WV_CERTDIR\" -v P=%s '/-----BEGIN CERTIFICATE-----/{n++;on=1;f=sprintf(\"%%s/%%s-%%04d.crt\",D,P,n)} on{print > f} /-----END CERTIFICATE-----/{on=0}' && rm %s",
-			wvCACertScriptPath, tmp, shQuote(prefix), tmp))
+			"RUN . %s && mkdir -p \"$WV_CERTDIR\" && base64 -d %s | awk -v D=\"$WV_CERTDIR\" -v P=%s '%s' && rm %s",
+			wvCACertScriptPath, tmp, shQuote(prefix), awkSplitProg, tmp))
 	} else {
 		// Single block or non-cert content (e.g. a CRL): install the file
 		// whole.
@@ -202,9 +206,6 @@ func GenerateCACertInlineLines(certContents map[string][]byte) []string {
 		lines = append(lines, inlineCertWriteLines(name, certContents[name])...)
 	}
 
-	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
-	lines = append(lines, "RUN . "+wvCACertScriptPath+" && eval \"$WV_UPDATE\"")
-
 	// Some store updaters (update-ca-trust on RHEL-family, trust extract on
 	// Arch/OpenSUSE) only include certs with CA basicConstraints, so CA:FALSE
 	// certs would silently vanish from the regenerated BundlePath. Append them
@@ -212,8 +213,11 @@ func GenerateCACertInlineLines(certContents map[string][]byte) []string {
 	// Every *.crt we dropped into $WV_CERTDIR is appended (glob-expanded at
 	// shell runtime, so the Dockerfile line stays short for large bundles);
 	// the canonical target bundle is created when missing.
-	lines = append(lines, "# --- injected by whalevet: ensure certs appear in CA bundles ---")
-	lines = append(lines, "RUN . "+wvCACertScriptPath+" && "+AppendExtraBundlesCmd([]string{"$WV_CERTDIR/*.crt"}, canonicalBundlePath))
+	// Update and append share one RUN: both invalidate together on cert
+	// change, and the append must follow the update in the same shell because
+	// the updaters overwrite the bundle.
+	lines = append(lines, "# --- injected by whalevet: update certificate store and CA bundles ---")
+	lines = append(lines, "RUN . "+wvCACertScriptPath+" && eval \"$WV_UPDATE\" && "+AppendExtraBundlesCmd([]string{"$WV_CERTDIR/*.crt"}, canonicalBundlePath))
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(canonicalBundlePath, canonicalTrustDir)...)
@@ -253,70 +257,50 @@ func certBlockCount(content []byte) int {
 	}
 }
 
-// ExpandCertFilesForContext expands cert files (basename -> content) into the
-// set of files that must exist in the build context so the COPY lines emitted
-// by GenerateCACertDockerfileLines resolve. Multi-cert bundles are split into
-// one <base>-NNNN.crt entry per certificate (mirroring the inline awk split)
-// so store updaters process each block instead of skipping the whole file;
-// single-block files keep their original basename. This is the single source
-// of truth shared by the Dockerfile line generator and the context-tar writer.
-func ExpandCertFilesForContext(certFiles map[string][]byte) map[string][]byte {
-	expanded := make(map[string][]byte, len(certFiles))
-	names := make([]string, 0, len(certFiles))
-	for name := range certFiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+// legacyInstallRun returns the single RUN command that installs every staged
+// certificate into the runtime-detected $WV_CERTDIR, refreshes the store and
+// appends the certs to the well-known bundles. Multi-cert bundles are split
+// into one <base>-NNNN.crt file per certificate inside the container (same
+// naming as the inline awk path); single files are installed under their
+// CertTargetName, since store updaters ignore non-.crt names. Update and
+// append run in the same shell: all three steps invalidate together on cert
+// change, and the append must follow the update because the updaters
+// overwrite the bundle.
+func legacyInstallRun(names []string, certFiles map[string][]byte) string {
+	parts := []string{". " + wvCACertScriptPath, "mkdir -p \"$WV_CERTDIR\""}
 	for _, name := range names {
-		content := certFiles[name]
-		blocks := splitCertBlocks(content)
-		if blocks == nil {
-			expanded[name] = content
-			continue
-		}
-		prefix := strings.TrimSuffix(CertTargetName(name), ".crt")
-		for i, block := range blocks {
-			expanded[fmt.Sprintf("%s-%04d.crt", prefix, i+1)] = block
+		src := wvStagingDir + "/" + name
+		if certBlockCount(certFiles[name]) >= 2 {
+			prefix := strings.TrimSuffix(CertTargetName(name), ".crt")
+			parts = append(parts, fmt.Sprintf("awk -v D=\"$WV_CERTDIR\" -v P=%s '%s' %s && rm %s",
+				shQuote(prefix), awkSplitProg, shQuote(src), shQuote(src)))
+		} else {
+			parts = append(parts, fmt.Sprintf("mv %s \"$WV_CERTDIR\"/%s",
+				shQuote(src), shQuote(CertTargetName(name))))
 		}
 	}
-	return expanded
+	parts = append(parts, "rm -rf "+wvStagingDir)
+	parts = append(parts, "eval \"$WV_UPDATE\"")
+	parts = append(parts, AppendExtraBundlesCmd([]string{"$WV_CERTDIR/*.crt"}, canonicalBundlePath))
+	return "RUN " + strings.Join(parts, " && ")
 }
 
-// splitCertBlocks returns one PEM block per certificate when content holds two
-// or more certificates, nil otherwise (single-cert and non-cert content are
-// kept whole). Splitting mirrors the inline awk path's per-cert filenames.
-func splitCertBlocks(content []byte) [][]byte {
-	var blocks [][]byte
-	for rest := content; ; {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type == "CERTIFICATE" {
-			blocks = append(blocks, pem.EncodeToMemory(block))
-		}
-	}
-	if len(blocks) < 2 {
-		return nil
-	}
-	return blocks
-}
-
-// GenerateCACertDockerfileLines emits install + per-cert COPY + update RUN
+// GenerateCACertDockerfileLines emits install + one COPY + one install RUN
 // lines for the legacy build path. certFiles maps the build-context entry name
 // (the COPY source, which the caller must place in the context tar) to its
-// PEM content. Multi-cert bundles are split into one <base>-NNNN.crt COPY per
-// certificate via ExpandCertFilesForContext, so store updaters process each
-// block instead of skipping the whole file.
+// PEM content (nil content means name only and is treated as a single
+// certificate).
 //
-// Certificates are COPYed into a fixed staging dir, then moved into the
-// runtime-detected "$WV_CERTDIR" (see caCertDetectScript), so the target dir
-// does not need to be guessed from the image name.
+// All files ride in a single COPY (COPY creates the staging dir, so no mkdir
+// step is needed); multi-cert bundles are split inside the container, so the
+// Dockerfile stays short no matter how many certificates a file holds.
+//
+// Certificates land in the runtime-detected "$WV_CERTDIR" (see
+// caCertDetectScript), so the target dir does not need to be guessed from the
+// image name.
 func GenerateCACertDockerfileLines(certFiles map[string][]byte) []string {
-	expanded := ExpandCertFilesForContext(certFiles)
-	names := make([]string, 0, len(expanded))
-	for name := range expanded {
+	names := make([]string, 0, len(certFiles))
+	for name := range certFiles {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -328,25 +312,13 @@ func GenerateCACertDockerfileLines(certFiles map[string][]byte) []string {
 	lines = append(lines, "# --- injected by whalevet: install ca-certificates package ---")
 	lines = append(lines, "RUN . "+wvCACertScriptPath+" && eval \"$WV_INSTALL\"")
 
-	// Copy each certificate into the staging dir (source is basename, which
-	// must exist in build context root), then move into the detected dir.
+	// Copy every certificate into the staging dir (sources are basenames,
+	// which must exist in the build context root), then install them into
+	// the detected dir, refresh the store and append to the CA bundles.
 	lines = append(lines, "# --- injected by whalevet: copy custom CA certificates ---")
-	lines = append(lines, "RUN mkdir -p "+wvStagingDir)
-	for _, name := range names {
-		lines = append(lines, fmt.Sprintf("COPY %s %s/%s", name, wvStagingDir, name))
-	}
-	lines = append(lines, "RUN . "+wvCACertScriptPath+" && mkdir -p \"$WV_CERTDIR\" && for __f in "+wvStagingDir+"/*.crt; do [ -f \"$__f\" ] || continue; mv \"$__f\" \"$WV_CERTDIR/\"; done && rm -rf "+wvStagingDir)
-
-	lines = append(lines, "# --- injected by whalevet: update certificate store ---")
-	lines = append(lines, "RUN . "+wvCACertScriptPath+" && eval \"$WV_UPDATE\"")
-
-	// See GenerateCACertInlineLines: p11-kit based updaters drop CA:FALSE
-	// certs, so append after the update to guarantee presence in the bundles.
-	// Sweep the cert dir with a glob (never a literal per-file list, which
-	// would exceed the line cap for split multi-cert bundles); the canonical
-	// target bundle is created when missing.
-	lines = append(lines, "# --- injected by whalevet: ensure certs appear in CA bundles ---")
-	lines = append(lines, "RUN . "+wvCACertScriptPath+" && "+AppendExtraBundlesCmd([]string{"$WV_CERTDIR/*.crt"}, canonicalBundlePath))
+	lines = append(lines, "COPY "+strings.Join(names, " ")+" "+wvStagingDir+"/")
+	lines = append(lines, "# --- injected by whalevet: install certificates, update store and CA bundles ---")
+	lines = append(lines, legacyInstallRun(names, certFiles))
 
 	lines = append(lines, "# --- injected by whalevet: set CA bundle env vars ---")
 	lines = append(lines, caCertEnvLines(canonicalBundlePath, canonicalTrustDir)...)

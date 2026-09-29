@@ -38,6 +38,33 @@ func RenderEnvValue(value string, ctx EnvContext) string {
 	return sb.String()
 }
 
+// envBlockLines renders KEY=value pairs as Dockerfile lines: a single folded
+// ENV instruction when every value is free of whitespace and quotes
+// (Dockerfile splits ENV pairs on unquoted whitespace, so such values must
+// keep their own line, preserving the previous rendering), otherwise one ENV
+// per pair.
+func envBlockLines(kvs []string) []string {
+	if len(kvs) == 0 {
+		return nil
+	}
+	fold := true
+	for _, kv := range kvs {
+		_, v, _ := strings.Cut(kv, "=")
+		if strings.ContainsAny(v, " \t\r\n\"'\\") {
+			fold = false
+			break
+		}
+	}
+	if fold {
+		return []string{"# --- injected by whalevet ---", "ENV " + strings.Join(kvs, " ")}
+	}
+	lines := make([]string, 0, len(kvs)*2)
+	for _, kv := range kvs {
+		lines = append(lines, "# --- injected by whalevet ---", "ENV "+kv)
+	}
+	return lines
+}
+
 // renderEnvKVs renders "KEY=value" lines, templating the value part only.
 func renderEnvKVs(kvs []string, ctx EnvContext) []string {
 	out := make([]string, 0, len(kvs))

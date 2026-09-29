@@ -79,11 +79,9 @@ func ModifyInline(content string, rules []config.Injection, certContents map[str
 	return modify(content, rules, certContents, true)
 }
 
-// ModifyCopy applies rules like Modify with certificate contents available,
-// so the legacy COPY path can split multi-cert bundles into one COPY per
-// certificate (see ExpandCertFilesForContext). certFiles maps the build
-// context entry name (the COPY source, which the caller must place in the
-// context tar) to its PEM content.
+// ModifyCopy applies rules like Modify with certificate contents available.
+// certFiles maps the build context entry name (the COPY source, which the
+// caller must place in the context tar) to its PEM content.
 func ModifyCopy(content string, rules []config.Injection, certFiles map[string][]byte) string {
 	return modify(content, rules, certFiles, false)
 }
@@ -167,17 +165,11 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 				result = append(result, "# --- injected by whalevet ---")
 				result = append(result, "RUN "+cmd)
 			}
-			for _, kv := range renderEnvKVs(envAfterBase, envCtx) {
-				result = append(result, "# --- injected by whalevet ---")
-				result = append(result, "ENV "+kv)
-			}
+			result = append(result, envBlockLines(renderEnvKVs(envAfterBase, envCtx))...)
 			if len(caCerts) > 0 && !injectedCerts {
 				injectedCerts = true
 				result = append(result, certLines()...)
-				for _, kv := range renderEnvKVs(extraCAEnv, envCtx) {
-					result = append(result, "# --- injected by whalevet ---")
-					result = append(result, "ENV "+kv)
-				}
+				result = append(result, envBlockLines(renderEnvKVs(extraCAEnv, envCtx))...)
 			}
 		}
 
@@ -189,10 +181,7 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 				result = append(result, "RUN "+cmd)
 			}
 			runBeforeEntrypoint = nil // only inject once
-			for _, kv := range renderEnvKVs(envBeforeEntrypoint, envCtx) {
-				result = append(result, "# --- injected by whalevet ---")
-				result = append(result, "ENV "+kv)
-			}
+			result = append(result, envBlockLines(renderEnvKVs(envBeforeEntrypoint, envCtx))...)
 			envBeforeEntrypoint = nil // only inject once
 		}
 
@@ -204,10 +193,7 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 			result = append(result, "# --- injected by whalevet ---")
 			result = append(result, "RUN "+cmd)
 		}
-		for _, kv := range renderEnvKVs(envBeforeEntrypoint, envCtx) {
-			result = append(result, "# --- injected by whalevet ---")
-			result = append(result, "ENV "+kv)
-		}
+		result = append(result, envBlockLines(renderEnvKVs(envBeforeEntrypoint, envCtx))...)
 	}
 
 	if !injectedCerts && len(caCerts) > 0 {
@@ -216,10 +202,7 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 		} else {
 			result = append(result, GenerateCACertDockerfileLines(dockerfileCertFiles(caCerts, certContents))...)
 		}
-		for _, kv := range extraCAEnv {
-			result = append(result, "# --- injected by whalevet ---")
-			result = append(result, "ENV "+kv)
-		}
+		result = append(result, envBlockLines(extraCAEnv)...)
 	}
 
 	return strings.Join(result, "\n")
@@ -227,8 +210,8 @@ func modify(content string, rules []config.Injection, certContents map[string][]
 
 // dockerfileCertFiles returns the cert file set for the legacy COPY path:
 // the provided contents when available, otherwise a name-only set keyed by
-// each certificate's basename (kept whole, never split, since no content is
-// available to split from).
+// each certificate's basename (nil content installs as a single certificate;
+// splitting happens inside the container).
 func dockerfileCertFiles(caCerts []string, certFiles map[string][]byte) map[string][]byte {
 	if certFiles != nil {
 		return certFiles

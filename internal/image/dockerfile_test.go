@@ -11,9 +11,7 @@ func TestModifyEnvAfterBase(t *testing.T) {
 	in := "FROM golang:1.22\nRUN echo hi\n"
 	want := `FROM golang:1.22
 # --- injected by whalevet ---
-ENV HTTP_PROXY=http://proxy.internal:8080
-# --- injected by whalevet ---
-ENV NO_PROXY=localhost,127.0.0.1
+ENV HTTP_PROXY=http://proxy.internal:8080 NO_PROXY=localhost,127.0.0.1
 RUN echo hi
 `
 	got := Modify(in, []config.Injection{
@@ -74,8 +72,7 @@ func TestModifyCACertExtraEnv(t *testing.T) {
 	})
 
 	for _, w := range []string{
-		"ENV GIT_SSL_NO_VERIFY=false",
-		"ENV MY_APP_REGION=eu",
+		"ENV GIT_SSL_NO_VERIFY=false MY_APP_REGION=eu",
 	} {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in output:\n%s", w, got)
@@ -83,7 +80,7 @@ func TestModifyCACertExtraEnv(t *testing.T) {
 	}
 
 	// Extra env must follow the trust env vars emitted with the cert block.
-	if strings.Index(got, "ENV NODE_EXTRA_CA_CERTS") > strings.Index(got, "ENV MY_APP_REGION") {
+	if strings.Index(got, "NODE_EXTRA_CA_CERTS=") > strings.Index(got, "MY_APP_REGION=") {
 		t.Errorf("extra env should come after the CA trust env block:\n%s", got)
 	}
 }
@@ -116,13 +113,8 @@ func TestModifyExtraCAEnvTemplates(t *testing.T) {
 		},
 	})
 
-	want := "ENV REQUEST_CA=/etc/ssl/certs/ca-certificates.crt"
+	want := "ENV REQUEST_CA=/etc/ssl/certs/ca-certificates.crt REQUEST_CA2=/etc/ssl/certs/ca-certificates.crt"
 	if !strings.Contains(got, want) {
-		t.Fatalf("expected rendered env in output:\n%s\nmissing %q", got, want)
-	}
-	// Template resolution check: value without {{}} is passed through unchanged
-	want2 := "ENV REQUEST_CA2=/etc/ssl/certs/ca-certificates.crt"
-	if !strings.Contains(got, want2) {
-		t.Fatalf("expected second rendered env:\n%s\nmissing %q", got, want2)
+		t.Fatalf("expected folded rendered env in output:\n%s\nmissing %q", got, want)
 	}
 }

@@ -15,18 +15,18 @@ func TestModifyCACertSetsTrustEnvVars(t *testing.T) {
 		{Type: "ca_certificates", Certificates: []string{"root.pem"}},
 	})
 
-	wantEnv := []string{
-		"ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
-		"ENV SSL_CERT_DIR=/etc/ssl/certs",
-		"ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
-		"ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
-		"ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt",
-		"ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt",
+	wantEnv := "ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" +
+		" SSL_CERT_DIR=/etc/ssl/certs" +
+		" CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" +
+		" REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" +
+		" PIP_CERT=/etc/ssl/certs/ca-certificates.crt" +
+		" NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"
+	if !strings.Contains(got, wantEnv) {
+		t.Errorf("missing folded trust ENV %q in output:\n%s", wantEnv, got)
 	}
-	for _, w := range wantEnv {
-		if !strings.Contains(got, w) {
-			t.Errorf("missing %q in output:\n%s", w, got)
-		}
+	// One ENV instruction, not six: fewer layers for the same environment.
+	if n := strings.Count(got, "\nENV "); n != 1 {
+		t.Errorf("expected exactly one folded ENV line, got %d:\n%s", n, got)
 	}
 }
 
@@ -42,9 +42,8 @@ func TestModifyCACertDistroDetectionIndependent(t *testing.T) {
 
 	for _, w := range []string{
 		"RUN . /etc/wv-ccenv.sh && eval \"$WV_INSTALL\"",
-		"RUN . /etc/wv-ccenv.sh && eval \"$WV_UPDATE\"",
-		"ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
-		"ENV SSL_CERT_DIR=/etc/ssl/certs",
+		"eval \"$WV_UPDATE\"",
+		"ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs",
 	} {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in output:\n%s", w, got)
@@ -88,10 +87,10 @@ func TestGenerateCACertInlineLinesAppendsToBundleAfterUpdate(t *testing.T) {
 	certs := map[string][]byte{"root.pem": []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")}
 	out := strings.Join(GenerateCACertInlineLines(certs), "\n")
 
-	// The append must run after the store update, since update commands
-	// overwrite the bundle.
-	if !strings.Contains(out, "RUN . /etc/wv-ccenv.sh && eval \"$WV_UPDATE\"\n# --- injected by whalevet: ensure certs appear in CA bundles ---\nRUN . /etc/wv-ccenv.sh && __wv_append") {
-		t.Errorf("bundle append should follow the store update:\n%s", out)
+	// The append must run after the store update in the same RUN, since
+	// update commands overwrite the bundle.
+	if !strings.Contains(out, "RUN . /etc/wv-ccenv.sh && eval \"$WV_UPDATE\" && __wv_append") {
+		t.Errorf("bundle append should follow the store update in one RUN:\n%s", out)
 	}
 	if !strings.Contains(out, "'/etc/ssl/certs/ca-certificates.crt'") {
 		t.Errorf("canonical BundlePath missing from append targets:\n%s", out)
@@ -182,59 +181,63 @@ func TestGenerateCACertDockerfileLinesAppendsBundlePath(t *testing.T) {
 	if !strings.Contains(out, "'/etc/ssl/certs/ca-certificates.crt'") {
 		t.Errorf("canonical BundlePath missing from append targets:\n%s", out)
 	}
-	if !strings.Contains(out, "RUN . /etc/wv-ccenv.sh && eval \"$WV_UPDATE\"\n# --- injected by whalevet: ensure certs appear in CA bundles ---") {
-		t.Errorf("append should follow the store update:\n%s", out)
+	if !strings.Contains(out, "eval \"$WV_UPDATE\" && __wv_append") {
+		t.Errorf("append should follow the store update in one RUN:\n%s", out)
 	}
 }
 
-func TestGenerateCACertDockerfileLinesCopiesToStagingThenDetectedDir(t *testing.T) {
+func TestGenerateCACertDockerfileLinesSingleCopyInContainerSplit(t *testing.T) {
 	bundle := "-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+	single := "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n"
 	out := strings.Join(GenerateCACertDockerfileLines(map[string][]byte{
 		"combined.pem": []byte(bundle),
+		"single.pem":   []byte(single),
 	}), "\n")
 
-	// Certificates are COPYed into the staging dir, then moved into the
-	// runtime-detected "$WV_CERTDIR"; a multi-cert bundle must be COPYed per
-	// certificate.
+	// One COPY carries every file; splitting happens inside the container so
+	// the Dockerfile stays short no matter how many certificates a file
+	// holds. Sources are sorted for deterministic output.
+	if !strings.Contains(out, "COPY combined.pem single.pem /etc/whalevet-cacert/") {
+		t.Errorf("missing single sorted COPY:\n%s", out)
+	}
+	if strings.Contains(out, "COPY combined-0001.crt") {
+		t.Errorf("must not emit per-certificate COPYs:\n%s", out)
+	}
+	// Multi-cert bundle: awk-split with the same <base>-NNNN naming as the
+	// inline path, then drop the staged bundle.
 	for _, want := range []string{
-		"COPY combined-0001.crt /etc/whalevet-cacert/combined-0001.crt",
-		"COPY combined-0002.crt /etc/whalevet-cacert/combined-0002.crt",
+		`awk -v D="$WV_CERTDIR" -v P='combined'`,
+		`sprintf("%s/%s-%04d.crt",D,P,n)`,
+		`rm '/etc/whalevet-cacert/combined.pem'`,
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("missing per-cert copy %q:\n%s", want, out)
+			t.Errorf("missing in-container split %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "COPY combined.pem") {
-		t.Errorf("multi-cert bundle must not be copied whole:\n%s", out)
+	// Single-cert file: installed under its .crt target name (store updaters
+	// ignore non-.crt names).
+	if !strings.Contains(out, `mv '/etc/whalevet-cacert/single.pem' "$WV_CERTDIR"/'single.crt'`) {
+		t.Errorf("single-cert file must be installed as .crt:\n%s", out)
 	}
-	if !strings.Contains(out, "mv \"$__f\" \"$WV_CERTDIR/\"") {
-		t.Errorf("staging certs must be moved into the detected cert dir:\n%s", out)
+	// Install, update and append share one RUN, in that order.
+	updateIdx := strings.Index(out, `eval "$WV_UPDATE"`)
+	appendIdx := strings.Index(out, "__wv_append")
+	if updateIdx < 0 || appendIdx < 0 || updateIdx > appendIdx {
+		t.Errorf("update must precede the bundle append:\n%s", out)
+	}
+	installRun := ""
+	for line := range strings.Lines(out) {
+		if strings.Contains(line, `eval "$WV_UPDATE"`) {
+			installRun = line
+		}
+	}
+	for _, want := range []string{`mkdir -p "$WV_CERTDIR"`, `rm -rf /etc/whalevet-cacert`} {
+		if !strings.Contains(installRun, want) {
+			t.Errorf("install RUN missing %q:\n%s", want, out)
+		}
 	}
 	if !strings.Contains(out, "for __f in $WV_CERTDIR/*.crt") {
 		t.Errorf("append must use a glob over the cert dir:\n%s", out)
-	}
-}
-
-func TestExpandCertFilesForContext(t *testing.T) {
-	single := "-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n"
-	multi := "-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
-
-	got := ExpandCertFilesForContext(map[string][]byte{
-		"single.pem": []byte(single),
-		"multi.pem":  []byte(multi),
-	})
-
-	if got["single.pem"] == nil {
-		t.Errorf("single-cert file must keep its basename:\n%#v", got)
-	}
-	if string(got["multi-0001.crt"]) != string([]byte("-----BEGIN CERTIFICATE-----\nMIIA\n-----END CERTIFICATE-----\n")) {
-		t.Errorf("multi-0001.crt should hold the first certificate:\n%#v", got)
-	}
-	if string(got["multi-0002.crt"]) != string([]byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")) {
-		t.Errorf("multi-0002.crt should hold the second certificate:\n%#v", got)
-	}
-	if got["multi.pem"] != nil {
-		t.Errorf("multi-cert bundle must be replaced by its split entries:\n%#v", got)
 	}
 }
 
